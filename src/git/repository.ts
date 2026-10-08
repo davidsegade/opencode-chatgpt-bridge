@@ -1,7 +1,8 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { resolve, join } from "node:path";
-import { realpath, readFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { realpath, readFile, lstat, readlink } from "node:fs/promises";
 
 const execFileAsync = promisify(execFile);
 
@@ -16,6 +17,22 @@ async function git(repoPath: string, args: string[]): Promise<ExecResult> {
     maxBuffer: 10 * 1024 * 1024
   });
   return { stdout: result.stdout.trim(), stderr: result.stderr.trim() };
+}
+
+async function gitRaw(repoPath: string, args: string[]): Promise<ExecResult> {
+  const result = await execFileAsync("git", ["-C", repoPath, ...args], {
+    encoding: "utf8",
+    maxBuffer: 10 * 1024 * 1024
+  });
+  return { stdout: result.stdout, stderr: result.stderr };
+}
+
+async function gitNul(repoPath: string, args: string[]): Promise<string[]> {
+  const result = await execFileAsync("git", ["-C", repoPath, ...args, "-z"], {
+    encoding: "utf8",
+    maxBuffer: 10 * 1024 * 1024
+  });
+  return result.stdout.split("\0").filter((s) => s.length > 0);
 }
 
 export type GitStatus = {
@@ -70,33 +87,28 @@ export async function validateGitRepo(repoPath: string): Promise<GitRepoInfo> {
 
 export async function getGitStatus(repoPath: string): Promise<GitStatus> {
   const info = await validateGitRepo(repoPath);
-  const porcelainResult = await git(info.topLevel, ["status", "--porcelain=v1", "--branch"]);
-  const porcelain = porcelainResult.stdout;
-
-  const lines = porcelain.split("\n").filter((line) => line.length > 0);
-  const branchLine = lines.find((line) => line.startsWith("##"));
-  const fileLines = lines.filter((line) => !line.startsWith("##"));
-
+  const entries = await gitNul(info.topLevel, ["status", "--porcelain=v1", "--branch", "--untracked-files=all"]);
   const untracked: string[] = [];
   const modified: string[] = [];
   const staged: string[] = [];
-
-  for (const line of fileLines) {
-    const status = line.slice(0, 2);
-    const file = line.slice(3);
-    if (status === "??") {
-      untracked.push(file);
-    } else {
-      if (status[1] === "M" || status[1] === "D" || status[1] === "R") {
-        modified.push(file);
-      }
-      if (status[0] === "M" || status[0] === "A" || status[0] === "D" || status[0] === "R") {
-        staged.push(file);
-      }
+  const display: string[] = [];
+  let count = 0;
+  for (let i = 0; i < entries.length; i++) {
+    const entry = entries[i]!;
+    if (entry.startsWith("##")) { display.push(entry); continue; }
+    count++;
+    const status = entry.slice(0, 2);
+    const file = entry.slice(3);
+    display.push(`${status} ${JSON.stringify(file)}`);
+    if (status === "??") untracked.push(file);
+    else {
+      if (status[1] !== " " && status[1] !== "?") modified.push(file);
+      if (status[0] !== " " && status[0] !== "?") staged.push(file);
+      if (/[RC]/.test(status)) i++; // In -z format destination precedes source.
     }
   }
-
-  const clean = fileLines.length === 0;
+  const porcelain = display.join("\n");
+  const clean = count === 0;
 
   return {
     repoPath: info.repoPath,
@@ -131,7 +143,7 @@ export async function getWorktreeTopLevel(repoPath: string): Promise<string> {
 
 export async function getGitDiff(repoPath: string): Promise<GitDiff> {
   const info = await validateGitRepo(repoPath);
-  const diffResult = await git(info.topLevel, ["diff", "--no-color"]);
+  const diffResult = await gitRaw(info.topLevel, ["diff", "--no-color", "--binary", "--no-ext-diff", "--no-textconv"]);
   const diff = diffResult.stdout;
   const hasChanges = diff.length > 0;
 
@@ -140,6 +152,26 @@ export async function getGitDiff(repoPath: string): Promise<GitDiff> {
     topLevel: info.topLevel,
     diff,
     stagedDiff: "",
+    untracked: [],
+    hasChanges
+  };
+}
+
+export async function getGitDiffWithStaged(repoPath: string): Promise<GitDiff> {
+  const info = await validateGitRepo(repoPath);
+  const diffResult = await gitRaw(info.topLevel, ["diff", "--no-color", "--binary", "--no-ext-diff", "--no-textconv"]);
+  const diff = diffResult.stdout;
+
+  const stagedDiffResult = await gitRaw(info.topLevel, ["diff", "--no-color", "--binary", "--no-ext-diff", "--no-textconv", "--staged"]);
+  const stagedDiff = stagedDiffResult.stdout;
+
+  const hasChanges = diff.length > 0 || stagedDiff.length > 0;
+
+  return {
+    repoPath: info.repoPath,
+    topLevel: info.topLevel,
+    diff,
+    stagedDiff,
     untracked: [],
     hasChanges
   };
@@ -161,17 +193,18 @@ export async function assertNotMain(repoPath: string): Promise<void> {
 
 export async function getGitDiffIncludingUntracked(repoPath: string): Promise<GitDiff> {
   const info = await validateGitRepo(repoPath);
-  const status = await getGitStatus(info.topLevel);
 
-  const diffResult = await git(info.topLevel, ["diff", "--no-color"]);
+  const diffResult = await gitRaw(info.topLevel, ["diff", "--no-color", "--binary", "--no-ext-diff", "--no-textconv"]);
   const diff = diffResult.stdout;
 
-  const stagedDiffResult = await git(info.topLevel, ["diff", "--no-color", "--staged"]);
+  const stagedDiffResult = await gitRaw(info.topLevel, ["diff", "--no-color", "--binary", "--no-ext-diff", "--no-textconv", "--staged"]);
   const stagedDiff = stagedDiffResult.stdout;
+
+  const untrackedFiles = await gitNul(info.topLevel, ["ls-files", "--others", "--exclude-standard"]);
 
   const untracked: Array<{ path: string; readable: boolean; error?: string }> = [];
 
-  for (const file of status.untracked) {
+  for (const file of untrackedFiles) {
     const filePath = join(info.topLevel, file);
     try {
       await readFile(filePath, "utf8");
@@ -191,4 +224,23 @@ export async function getGitDiffIncludingUntracked(repoPath: string): Promise<Gi
     untracked,
     hasChanges
   };
+}
+export type GitSnapshot = {
+  head: string;
+  diff: string;
+  stagedDiff: string;
+  untracked: Array<{ path: string; hash: string; mode: number }>;
+};
+
+export async function captureGitSnapshot(repoPath: string, diff: GitDiff, head: string): Promise<GitSnapshot> {
+  const untracked: GitSnapshot["untracked"] = [];
+  for (const file of diff.untracked) {
+    if (!file.readable) throw new Error(`Git verification incomplete: ${file.path}: ${file.error}`);
+    const path = join(repoPath, file.path);
+    const info = await lstat(path);
+    const content = info.isSymbolicLink() ? Buffer.from(await readlink(path)) : await readFile(path);
+    untracked.push({ path: file.path, hash: createHash("sha256").update(content).digest("hex"), mode: info.mode });
+  }
+  untracked.sort((a, b) => a.path < b.path ? -1 : a.path > b.path ? 1 : 0);
+  return { head, diff: diff.diff, stagedDiff: diff.stagedDiff, untracked };
 }

@@ -1,7 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod/v4";
 import type { BridgeConfig, JsonValue, OpencodeStatus } from "../types.js";
-import { isTerminalOpencodeStatus, isBusyOpencodeStatus } from "../types.js";
+import { isTerminalOpencodeStatus, isSuccessfulTerminalOpencodeStatus } from "../types.js";
 import { listProjects, validateRepoPath } from "../security/paths.js";
 import { OpencodeProcessManager } from "../opencode/process.js";
 import { StateStore } from "../state/store.js";
@@ -9,7 +9,8 @@ import { safeTool } from "./results.js";
 import {
   validateGitRepo,
   getGitStatus,
-  getGitDiff,
+  captureGitSnapshot,
+  getGitDiffWithStaged,
   assertClean,
   assertNotMain,
   getGitDiffIncludingUntracked
@@ -27,7 +28,7 @@ function json(value: unknown): JsonValue {
   return JSON.parse(JSON.stringify(value)) as JsonValue;
 }
 
-async function getSessionClient(ctx: RegisterContext, bridgeSessionId: string, allowRepoLevel = false) {
+async function getSessionClient(ctx: RegisterContext, bridgeSessionId: string) {
   const bridge = await ctx.state.getSession(bridgeSessionId);
   const managed = await ctx.processManager.ensure(bridge.repoPath);
 
@@ -578,7 +579,7 @@ export function createBridgeMcpServer(ctx: RegisterContext): McpServer {
         const validated = await validateRepoPath(repoPath, ctx.config.allowedRoots);
         const diff = includeUntracked
           ? await getGitDiffIncludingUntracked(validated)
-          : await getGitDiff(validated);
+          : await getGitDiffWithStaged(validated);
         return diff;
       })
   );
@@ -609,7 +610,7 @@ export function createBridgeMcpServer(ctx: RegisterContext): McpServer {
       safeTool(async () => {
         const validated = await validateRepoPath(input.repoPath, ctx.config.allowedRoots);
 
-        const repoInfo = await validateGitRepo(validated);
+        await validateGitRepo(validated);
 
         if (input.requireClean) {
           await assertClean(validated);
@@ -621,6 +622,8 @@ export function createBridgeMcpServer(ctx: RegisterContext): McpServer {
 
         const initialStatus = await getGitStatus(validated);
         const initialHead = initialStatus.head;
+        const initialGitDiff = await getGitDiffIncludingUntracked(validated);
+        const initialSnapshot = await captureGitSnapshot(validated, initialGitDiff, initialHead);
 
         const managed = await ctx.processManager.ensure(validated);
         const client = ctx.processManager.clientFor(managed);
@@ -649,6 +652,7 @@ export function createBridgeMcpServer(ctx: RegisterContext): McpServer {
         const startTime = Date.now();
         let lastStatus: OpencodeStatus | null = null;
         let terminal = false;
+        let successfulTerminal = false;
 
         while (Date.now() - startTime < input.timeoutMs) {
           const statuses = await client.getSessionStatus();
@@ -657,6 +661,7 @@ export function createBridgeMcpServer(ctx: RegisterContext): McpServer {
 
           if (isTerminalOpencodeStatus(status)) {
             terminal = true;
+            successfulTerminal = isSuccessfulTerminalOpencodeStatus(status);
             break;
           }
 
@@ -666,7 +671,14 @@ export function createBridgeMcpServer(ctx: RegisterContext): McpServer {
         const finalGitStatus = await getGitStatus(validated);
         const finalGitDiff = await getGitDiffIncludingUntracked(validated);
 
-        const gitChanged = finalGitStatus.head !== initialHead || finalGitDiff.hasChanges;
+        let verificationError: string | undefined;
+        let gitChanged = false;
+        try {
+          const finalSnapshot = await captureGitSnapshot(validated, finalGitDiff, finalGitStatus.head);
+          gitChanged = JSON.stringify(initialSnapshot) !== JSON.stringify(finalSnapshot);
+        } catch (error) {
+          verificationError = error instanceof Error ? error.message : String(error);
+        }
 
         const baseResult = {
           bridgeSession: json(bridge),
@@ -688,6 +700,14 @@ export function createBridgeMcpServer(ctx: RegisterContext): McpServer {
 
         if (!terminal) {
           return { ...baseResult, success: false, error: "Task timed out before reaching terminal state." };
+        }
+
+        if (!successfulTerminal) {
+          return { ...baseResult, success: false, error: `OpenCode terminated with status: ${JSON.stringify(lastStatus)}. Only idle/completed are considered successful.` };
+        }
+
+        if (verificationError) {
+          return { ...baseResult, success: false, error: verificationError };
         }
 
         if (!gitChanged) {

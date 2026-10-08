@@ -33,8 +33,10 @@ The `ia_dev_run_task` tool implements this flow:
 5. Blocks writing to main/master (by default)
 6. Creates NEW opencode session on current server
 7. Sends prompt, waits for terminal state using correct status detection
-8. Re-queries physical Git for final status and diff
-9. Returns success **only if** Git shows actual changes
+8. Compares physical HEAD, staged and unstaged patches, and untracked content hashes/modes before and after execution
+9. Returns success only for idle/completed with a changed physical snapshot; error/cancelled and incomplete verification fail
+
+`requireClean` defaults to true and is an entry precondition. With `requireClean:false`, unchanged preexisting edits do not count as task changes. Unreadable untracked files prevent successful verification. The snapshot comparison detects repository changes, but does not attribute concurrent edits by other processes to a particular agent.
 
 ---
 
@@ -52,7 +54,7 @@ Every bridge session stores its `baseUrl` (the opencode server it was created on
 persistedSession.baseUrl === currentManagedServer.baseUrl
 ```
 
-If they differ → **`SERVER_MISMATCH` error** (also surfaced as `STALE_SESSION`)
+If they differ → **`SERVER_MISMATCH` error**
 
 **Operations that enforce this:**
 - `opencode_get_session_status`
@@ -76,7 +78,7 @@ If they differ → **`SERVER_MISMATCH` error** (also surfaced as `STALE_SESSION`
 
 ### Practical Implications
 
-- **Restarting the bridge** or **changing opencode server port** invalidates all previous bridge sessions
+- **Changing the managed server baseUrl** makes previous sessions fail the binding check. A restart that preserves the same URL is not detected by this check
 - You **must create a new session** after any server change
 - Old sessions in `~/.opencode-chatgpt-bridge/sessions.json` become stale and will return `SERVER_MISMATCH`
 
@@ -194,7 +196,7 @@ pnpm -C /private/tmp/opencode-chatgpt-bridge run uninstall-service
 cp /private/tmp/opencode-chatgpt-bridge/.env /Users/davidsegade/IA/IA-DEV/.env
 
 # 3. Sessions persist automatically in ~/.opencode-chatgpt-bridge/sessions.json
-#    (but will be STALE after server restart — create new sessions)
+#    (create new sessions if the managed server baseUrl changes)
 
 # 4. Build & start in new location
 cd /Users/davidsegade/IA/IA-DEV

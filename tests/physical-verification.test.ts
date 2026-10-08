@@ -1,0 +1,83 @@
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { mkdtemp, writeFile, rm, mkdir, chmod } from "node:fs/promises";
+import { execFileSync } from "node:child_process";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { createBridgeMcpServer } from "../src/mcp/tools.js";
+import { isSuccessfulTerminalOpencodeStatus } from "../src/types.js";
+import { getGitStatus, getGitDiff } from "../src/git/repository.js";
+
+let repo: string;
+function git(...args: string[]) { return execFileSync("git", ["-C", repo, ...args], { encoding: "utf8" }); }
+beforeEach(async () => {
+  repo = await mkdtemp(join(tmpdir(), "ia-physical-"));
+  git("init", "-b", "feature"); git("config", "user.name", "Test"); git("config", "user.email", "test@example.invalid");
+  await writeFile(join(repo, "tracked.txt"), "original\n\n"); git("add", "."); git("commit", "-m", "fixture");
+});
+afterEach(async () => { await rm(repo, { recursive: true, force: true }); });
+function bridge(action: () => Promise<unknown> = async () => {}, status = { type: "idle" }) {
+  const client = { createSession: vi.fn(async () => ({ id: "s" })), sendMessage: vi.fn(action), getSessionStatus: async () => ({ s: status }), getMessages: async () => [], getDiff: async () => [{ diff: "claimed change" }] };
+  const server = createBridgeMcpServer({ config: { allowedRoots: [repo] } as any, processManager: { ensure: async () => ({ baseUrl: "http://localhost:1" }), clientFor: () => client } as any, state: { createSession: async (x: unknown) => x, getSession: async () => ({ repoPath: repo, baseUrl: "http://localhost:2" }) } as any });
+  const tool = (server as any)._registeredTools.ia_dev_run_task;
+  return { server, client, run: async (extra = {}) => (await tool.handler(tool.inputSchema.parse({ repoPath: repo, prompt: "test", includeMessages: false, ...extra }))).structuredContent };
+}
+describe("physical task verification", () => {
+  it("does not treat a legacy idle field as overriding a current error", () => {
+    expect(isSuccessfulTerminalOpencodeStatus({ type: "error", status: "idle" })).toBe(false);
+    expect(isSuccessfulTerminalOpencodeStatus({ status: "completed" })).toBe(true);
+  });
+  it("detects new edits within a preexisting tracked binary diff", async () => {
+    await writeFile(join(repo, "binary"), Buffer.from([0, 255])); git("add", "."); git("commit", "-m", "binary fixture");
+    await writeFile(join(repo, "binary"), Buffer.from([0, 254]));
+    const b = bridge(async () => writeFile(join(repo, "binary"), Buffer.from([0, 253])));
+    expect((await b.run({ requireClean: false })).success).toBe(true);
+  });
+  it("applies requireClean default before sending any prompt", async () => {
+    await writeFile(join(repo, "tracked.txt"), "prior edit"); const b = bridge();
+    expect((await b.run()).ok).toBe(false); expect(b.client.sendMessage).not.toHaveBeenCalled();
+  });
+  it("succeeds with omitted requireClean and a real physical edit", async () => {
+    const b = bridge(async () => writeFile(join(repo, "tracked.txt"), "new edit")); expect((await b.run()).success).toBe(true);
+  });
+  it.each(["unstaged", "staged", "untracked"])("rejects unchanged preexisting %s changes", async kind => {
+    await writeFile(join(repo, kind === "untracked" ? "new.txt" : "tracked.txt"), "prior edit");
+    if (kind === "staged") git("add", ".");
+    const b = bridge(); expect((await b.run({ requireClean: false })).success).toBe(false);
+  });
+  it("detects changed binary content of an existing untracked file", async () => {
+    await writeFile(join(repo, "new.bin"), Buffer.from([0, 255]));
+    const b = bridge(async () => writeFile(join(repo, "new.bin"), Buffer.from([0, 254])));
+    expect((await b.run({ requireClean: false })).success).toBe(true);
+  });
+  it.each(["error", "cancelled"])("rejects %s despite physical edits", async type => {
+    const b = bridge(async () => writeFile(join(repo, "tracked.txt"), "new edit"), { type }); expect((await b.run()).success).toBe(false);
+  });
+  it("rejects reported OpenCode changes without physical edits", async () => { expect((await bridge().run()).success).toBe(false); });
+  it("fails verification if an untracked file becomes unreadable", async () => {
+    const b = bridge(async () => { await writeFile(join(repo, "restricted"), "x"); await chmod(join(repo, "restricted"), 0); });
+    try { const r = await b.run(); expect(r.success).toBe(false); expect(r.error).toContain("verification incomplete"); }
+    finally { await chmod(join(repo, "restricted"), 0o600); }
+  });
+  it.each(["main", "master"])("blocks %s before launching", async name => {
+    git("branch", "-m", name); const b = bridge(); expect((await b.run()).error).toContain("protected branch"); expect(b.client.sendMessage).not.toHaveBeenCalled();
+  });
+  it("preserves SERVER_MISMATCH in the result and does not query the wrong server", async () => {
+    const b = bridge(); const tool = (b.server as any)._registeredTools.opencode_get_messages;
+    const r = await tool.handler(tool.inputSchema.parse({ bridgeSessionId: "old" })); expect(r.structuredContent.code).toBe("SERVER_MISMATCH");
+  });
+  it("keeps staged changes when excluding untracked", async () => {
+    await writeFile(join(repo, "tracked.txt"), "staged edit"); git("add", "."); await writeFile(join(repo, "new.txt"), "untracked");
+    const tool = (bridge().server as any)._registeredTools.repo_git_diff;
+    const r = (await tool.handler(tool.inputSchema.parse({ repoPath: repo, includeUntracked: false }))).structuredContent;
+    expect(r.stagedDiff).toContain("staged edit"); expect(r.diff).toBe(""); expect(r.untracked).toEqual([]); expect(r.hasChanges).toBe(true);
+  });
+  it("preserves Git patch bytes and trailing blank context", async () => {
+    await writeFile(join(repo, "tracked.txt"), "changed\n\n"); const r = await getGitDiff(repo); expect(r.diff).toBe(git("diff", "--no-color"));
+    expect(() => execFileSync("git", ["-C", repo, "apply", "--check", "--reverse", "-"], { input: r.diff })).not.toThrow();
+  });
+  it("parses Unicode, newline and tab paths, nested files and rename source records", async () => {
+    const name = 'ñ\t"\n.txt'; await mkdir(join(repo, "newdir")); await writeFile(join(repo, "newdir", name), "x");
+    git("mv", "tracked.txt", name); await writeFile(join(repo, name), "also modified"); const r = await getGitStatus(repo);
+    expect(r.untracked).toEqual([`newdir/${name}`]); expect(r.staged).toEqual([name]); expect(r.modified).toEqual([name]);
+  });
+});

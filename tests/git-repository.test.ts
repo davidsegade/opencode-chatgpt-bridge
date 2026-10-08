@@ -7,6 +7,7 @@ import {
   getGitStatus,
   getGitDiff,
   getGitDiffIncludingUntracked,
+  getGitDiffWithStaged,
   getCurrentBranch,
   getHead,
   getWorktreeTopLevel,
@@ -19,7 +20,7 @@ let realTestRepo: string;
 
 async function initGitRepo(path: string) {
   const { spawnSync } = await import("node:child_process");
-  spawnSync("git", ["init"], { cwd: path, encoding: "utf8" });
+  spawnSync("git", ["init", "-b", "main"], { cwd: path, encoding: "utf8" });
   spawnSync("git", ["config", "user.email", "test@test.com"], { cwd: path, encoding: "utf8" });
   spawnSync("git", ["config", "user.name", "Test User"], { cwd: path, encoding: "utf8" });
 }
@@ -199,9 +200,82 @@ describe("Git Repository - getGitDiffIncludingUntracked", () => {
     expect(diff.untracked[0]).toEqual({ path: "newfile.txt", readable: true });
   });
 
-  it("marks untracked as unreadable when read fails", async () => {
+
+  it("lists untracked files in subdirectories", async () => {
+    await mkdir(join(testRepo, "subdir"), { recursive: true });
+    await writeFile(join(testRepo, "subdir", "nested.txt"), "nested content");
     const diff = await getGitDiffIncludingUntracked(testRepo);
-    // No untracked files initially
+    expect(diff.hasChanges).toBe(true);
+    expect(diff.untracked).toHaveLength(1);
+    expect(diff.untracked[0]).toEqual({ path: "subdir/nested.txt", readable: true });
+  });
+
+  it("handles unicode and special characters in filenames", async () => {
+    const specialName = "文件-😀-test.txt";
+    await writeFile(join(testRepo, specialName), "unicode content");
+    const diff = await getGitDiffIncludingUntracked(testRepo);
+    expect(diff.hasChanges).toBe(true);
+    expect(diff.untracked).toHaveLength(1);
+    expect(diff.untracked[0].path).toBe(specialName);
+    expect(diff.untracked[0].readable).toBe(true);
+  });
+
+  it("marks untracked as unreadable when read fails", async () => {
+    // Create a file and remove read permissions
+    const restrictedFile = "restricted.txt";
+    await writeFile(join(testRepo, restrictedFile), "secret");
+    await import("node:fs/promises").then(fs => fs.chmod(join(testRepo, restrictedFile), 0o000));
+    try {
+      const diff = await getGitDiffIncludingUntracked(testRepo);
+      expect(diff.untracked).toHaveLength(1);
+      expect(diff.untracked[0].path).toBe(restrictedFile);
+      expect(diff.untracked[0].readable).toBe(false);
+      expect(diff.untracked[0].error).toBeDefined();
+    } finally {
+      // Restore permissions for cleanup
+      await import("node:fs/promises").then(fs => fs.chmod(join(testRepo, restrictedFile), 0o644));
+    }
+  });
+});
+
+describe("Git Repository - getGitDiffWithStaged", () => {
+  beforeEach(async () => {
+    testRepo = await mkdtemp(join(tmpdir(), "git-diff-staged-"));
+    realTestRepo = await realpath(testRepo);
+    await initGitRepo(testRepo);
+    await gitCommit(testRepo, "Initial commit", { "file1.txt": "original" });
+  });
+
+  afterEach(async () => {
+    await rm(testRepo, { recursive: true, force: true });
+  });
+
+  it("returns staged diff when includeUntracked is false", async () => {
+    await writeFile(join(testRepo, "file1.txt"), "staged change");
+    const { spawnSync } = await import("node:child_process");
+    spawnSync("git", ["add", "file1.txt"], { cwd: testRepo, encoding: "utf8" });
+    const diff = await getGitDiffWithStaged(testRepo);
+    expect(diff.hasChanges).toBe(true);
+    expect(diff.stagedDiff).toContain("staged change");
+    expect(diff.diff).toBe("");
+    expect(diff.untracked).toHaveLength(0);
+  });
+
+  it("returns both unstaged and staged diff when includeUntracked is false", async () => {
+    // First, add and commit file2.txt so it's tracked
+    await writeFile(join(testRepo, "file2.txt"), "original file2");
+    const { spawnSync } = await import("node:child_process");
+    spawnSync("git", ["add", "file2.txt"], { cwd: testRepo, encoding: "utf8" });
+    spawnSync("git", ["commit", "-m", "Add file2"], { cwd: testRepo, encoding: "utf8" });
+
+    // Now modify file1.txt (staged) and file2.txt (unstaged)
+    await writeFile(join(testRepo, "file1.txt"), "staged change");
+    await writeFile(join(testRepo, "file2.txt"), "unstaged change");
+    spawnSync("git", ["add", "file1.txt"], { cwd: testRepo, encoding: "utf8" });
+    const diff = await getGitDiffWithStaged(testRepo);
+    expect(diff.hasChanges).toBe(true);
+    expect(diff.stagedDiff).toContain("staged change");
+    expect(diff.diff).toContain("unstaged change");
     expect(diff.untracked).toHaveLength(0);
   });
 });

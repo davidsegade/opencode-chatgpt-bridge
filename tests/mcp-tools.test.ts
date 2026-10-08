@@ -23,6 +23,7 @@ vi.mock("../src/git/repository.js", async (importOriginal) => {
   const actual = await importOriginal();
   return {
     ...actual,
+    captureGitSnapshot: vi.fn(async (_path, diff, head) => ({ head, diff: diff.diff, stagedDiff: diff.stagedDiff, untracked: diff.untracked })),
     validateGitRepo: vi.fn(),
     getGitStatus: vi.fn(),
     getGitDiffIncludingUntracked: vi.fn(),
@@ -902,5 +903,268 @@ describe("MCP Tools - ia_dev_run_task", () => {
 
     const content = result.structuredContent as any;
     expect(content.success).toBe(true);
+  });
+});
+
+describe("MCP Tools - ia_dev_run_task additional scenarios", () => {
+  it("returns success false when OpenCode reports error status even with Git changes", async () => {
+    const { config, processManager, state, mockClient } = createMockContext({
+      gitMocks: {
+        getGitStatus: vi.fn()
+          .mockResolvedValueOnce({
+            repoPath: "/tmp/test/repo",
+            topLevel: "/tmp/test/repo",
+            branch: "feature-branch",
+            head: "abc123",
+            clean: true,
+            porcelain: "## feature-branch",
+            untracked: [],
+            modified: [],
+            staged: []
+          })
+          .mockResolvedValueOnce({
+            repoPath: "/tmp/test/repo",
+            topLevel: "/tmp/test/repo",
+            branch: "feature-branch",
+            head: "def456",
+            clean: false,
+            porcelain: "## feature-branch\n M newfile.txt",
+            untracked: ["newfile.txt"],
+            modified: [],
+            staged: []
+          }),
+        getGitDiffIncludingUntracked: vi.fn().mockResolvedValue({
+          repoPath: "/tmp/test/repo",
+          topLevel: "/tmp/test/repo",
+          diff: "diff --git a/newfile.txt b/newfile.txt\nnew file mode 100644\n--- /dev/null\n+++ b/newfile.txt\n@@ -0,0 +1 @@\n+new content",
+          stagedDiff: "",
+          untracked: [{ path: "newfile.txt", readable: true }],
+          hasChanges: true
+        }),
+        validateGitRepo: vi.fn().mockResolvedValue({
+          repoPath: "/tmp/test/repo",
+          topLevel: "/tmp/test/repo",
+          branch: "feature-branch",
+          head: "abc123",
+          isMainBranch: false
+        }),
+        assertClean: vi.fn().mockResolvedValue(undefined),
+        assertNotMain: vi.fn().mockResolvedValue(undefined)
+      }
+    });
+    const server = createBridgeMcpServer({ config, processManager: processManager as any, state: state as any });
+
+    mockClient.getSessionStatus.mockResolvedValue({ ses_test123: { status: "error", error: "Something failed" } });
+
+    const tool = (server as any)._registeredTools?.ia_dev_run_task;
+    const result = await tool.handler({
+      repoPath: "/tmp/test/repo",
+      prompt: "Create a test file",
+      allowMain: true,
+      timeoutMs: 10000,
+      pollIntervalMs: 10,
+      includeMessages: true,
+      messageLimit: 10
+    });
+
+    const content = result.structuredContent as any;
+    expect(content.success).toBe(false);
+    expect(content.error).toContain("error");
+  });
+
+  it("returns success false when OpenCode reports cancelled status even with Git changes", async () => {
+    const { config, processManager, state, mockClient } = createMockContext({
+      gitMocks: {
+        getGitStatus: vi.fn()
+          .mockResolvedValueOnce({
+            repoPath: "/tmp/test/repo",
+            topLevel: "/tmp/test/repo",
+            branch: "feature-branch",
+            head: "abc123",
+            clean: true,
+            porcelain: "## feature-branch",
+            untracked: [],
+            modified: [],
+            staged: []
+          })
+          .mockResolvedValueOnce({
+            repoPath: "/tmp/test/repo",
+            topLevel: "/tmp/test/repo",
+            branch: "feature-branch",
+            head: "def456",
+            clean: false,
+            porcelain: "## feature-branch\n M newfile.txt",
+            untracked: ["newfile.txt"],
+            modified: [],
+            staged: []
+          }),
+        getGitDiffIncludingUntracked: vi.fn().mockResolvedValue({
+          repoPath: "/tmp/test/repo",
+          topLevel: "/tmp/test/repo",
+          diff: "diff --git a/newfile.txt b/newfile.txt\nnew file mode 100644\n--- /dev/null\n+++ b/newfile.txt\n@@ -0,0 +1 @@\n+new content",
+          stagedDiff: "",
+          untracked: [{ path: "newfile.txt", readable: true }],
+          hasChanges: true
+        }),
+        validateGitRepo: vi.fn().mockResolvedValue({
+          repoPath: "/tmp/test/repo",
+          topLevel: "/tmp/test/repo",
+          branch: "feature-branch",
+          head: "abc123",
+          isMainBranch: false
+        }),
+        assertClean: vi.fn().mockResolvedValue(undefined),
+        assertNotMain: vi.fn().mockResolvedValue(undefined)
+      }
+    });
+    const server = createBridgeMcpServer({ config, processManager: processManager as any, state: state as any });
+
+    mockClient.getSessionStatus.mockResolvedValue({ ses_test123: { status: "cancelled" } });
+
+    const tool = (server as any)._registeredTools?.ia_dev_run_task;
+    const result = await tool.handler({
+      repoPath: "/tmp/test/repo",
+      prompt: "Create a test file",
+      allowMain: true,
+      timeoutMs: 10000,
+      pollIntervalMs: 10,
+      includeMessages: true,
+      messageLimit: 10
+    });
+
+    const content = result.structuredContent as any;
+    expect(content.success).toBe(false);
+    expect(content.error).toContain("cancelled");
+  });
+
+  it("returns success true when OpenCode reports completed status with Git changes", async () => {
+    const { config, processManager, state, mockClient } = createMockContext({
+      gitMocks: {
+        getGitStatus: vi.fn()
+          .mockResolvedValueOnce({
+            repoPath: "/tmp/test/repo",
+            topLevel: "/tmp/test/repo",
+            branch: "feature-branch",
+            head: "abc123",
+            clean: true,
+            porcelain: "## feature-branch",
+            untracked: [],
+            modified: [],
+            staged: []
+          })
+          .mockResolvedValueOnce({
+            repoPath: "/tmp/test/repo",
+            topLevel: "/tmp/test/repo",
+            branch: "feature-branch",
+            head: "def456",
+            clean: false,
+            porcelain: "## feature-branch\n M newfile.txt",
+            untracked: ["newfile.txt"],
+            modified: [],
+            staged: []
+          }),
+        getGitDiffIncludingUntracked: vi.fn().mockResolvedValue({
+          repoPath: "/tmp/test/repo",
+          topLevel: "/tmp/test/repo",
+          diff: "diff --git a/newfile.txt b/newfile.txt\nnew file mode 100644\n--- /dev/null\n+++ b/newfile.txt\n@@ -0,0 +1 @@\n+new content",
+          stagedDiff: "",
+          untracked: [{ path: "newfile.txt", readable: true }],
+          hasChanges: true
+        }),
+        validateGitRepo: vi.fn().mockResolvedValue({
+          repoPath: "/tmp/test/repo",
+          topLevel: "/tmp/test/repo",
+          branch: "feature-branch",
+          head: "abc123",
+          isMainBranch: false
+        }),
+        assertClean: vi.fn().mockResolvedValue(undefined),
+        assertNotMain: vi.fn().mockResolvedValue(undefined)
+      }
+    });
+    const server = createBridgeMcpServer({ config, processManager: processManager as any, state: state as any });
+
+    mockClient.getSessionStatus.mockResolvedValue({ ses_test123: { status: "completed" } });
+
+    const tool = (server as any)._registeredTools?.ia_dev_run_task;
+    const result = await tool.handler({
+      repoPath: "/tmp/test/repo",
+      prompt: "Create a test file",
+      allowMain: true,
+      timeoutMs: 10000,
+      pollIntervalMs: 10,
+      includeMessages: true,
+      messageLimit: 10
+    });
+
+    const content = result.structuredContent as any;
+    expect(content.success).toBe(true);
+    expect(content.gitVerification.gitChanged).toBe(true);
+  });
+
+  it("returns success false when repo initially dirty, requireClean:false, and task produces no new changes", async () => {
+    const { config, processManager, state, mockClient } = createMockContext({
+      gitMocks: {
+        getGitStatus: vi.fn()
+          .mockResolvedValueOnce({
+            repoPath: "/tmp/test/repo",
+            topLevel: "/tmp/test/repo",
+            branch: "feature-branch",
+            head: "abc123",
+            clean: false,
+            porcelain: "## feature-branch\n M existing.txt",
+            untracked: [],
+            modified: ["existing.txt"],
+            staged: []
+          })
+          .mockResolvedValueOnce({
+            repoPath: "/tmp/test/repo",
+            topLevel: "/tmp/test/repo",
+            branch: "feature-branch",
+            head: "abc123",
+            clean: false,
+            porcelain: "## feature-branch\n M existing.txt",
+            untracked: [],
+            modified: ["existing.txt"],
+            staged: []
+          }),
+        getGitDiffIncludingUntracked: vi.fn().mockResolvedValue({
+          repoPath: "/tmp/test/repo",
+          topLevel: "/tmp/test/repo",
+          diff: "",
+          stagedDiff: "",
+          untracked: [],
+          hasChanges: false
+        }),
+        validateGitRepo: vi.fn().mockResolvedValue({
+          repoPath: "/tmp/test/repo",
+          topLevel: "/tmp/test/repo",
+          branch: "feature-branch",
+          head: "abc123",
+          isMainBranch: false
+        }),
+        assertClean: vi.fn().mockResolvedValue(undefined),
+        assertNotMain: vi.fn().mockResolvedValue(undefined)
+      }
+    });
+    const server = createBridgeMcpServer({ config, processManager: processManager as any, state: state as any });
+
+    mockClient.getSessionStatus.mockResolvedValue({ ses_test123: { status: "idle" } });
+
+    const tool = (server as any)._registeredTools?.ia_dev_run_task;
+    const result = await tool.handler({
+      repoPath: "/tmp/test/repo",
+      prompt: "Do nothing",
+      requireClean: false,
+      allowMain: true,
+      timeoutMs: 10000,
+      pollIntervalMs: 10,
+      includeMessages: true,
+      messageLimit: 10
+    });
+
+    const content = result.structuredContent as any;
+    expect(content.success).toBe(false);
+    expect(content.error).toContain("no Git changes detected");
   });
 });

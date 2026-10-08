@@ -71,6 +71,13 @@ export function isTerminalOpencodeStatus(status: OpencodeStatus | null | undefin
   return false;
 }
 
+export function isSuccessfulTerminalOpencodeStatus(status: OpencodeStatus | null | undefined): boolean {
+  if (!status || typeof status !== "object") return false;
+  const obj = status as Record<string, unknown>;
+  const value = typeof obj.type === "string" ? obj.type : obj.status;
+  return value === "idle" || value === "completed";
+}
+
 export function isBusyOpencodeStatus(status: OpencodeStatus | null | undefined): boolean {
   if (!status || typeof status !== "object") return false;
   const obj = status as Record<string, unknown>;
