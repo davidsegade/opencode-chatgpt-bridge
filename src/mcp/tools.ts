@@ -1,3 +1,4 @@
+import { resolveSessionStatus } from "../opencode/status.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod/v4";
 import type { BridgeConfig, JsonValue, OpencodeStatus } from "../types.js";
@@ -182,7 +183,7 @@ export function createBridgeMcpServer(ctx: RegisterContext): McpServer {
         const statuses = await client.getSessionStatus();
         return {
           bridgeSession: json(bridge),
-          opencodeStatus: json(statuses[bridge.opencodeSessionId] ?? null),
+          opencodeStatus: json(await resolveSessionStatus(client, bridge.opencodeSessionId, statuses)),
           allStatuses: json(statuses),
           managedServer: managed.baseUrl
         };
@@ -394,7 +395,7 @@ export function createBridgeMcpServer(ctx: RegisterContext): McpServer {
 
         while (Date.now() - startTime < timeoutMs) {
           const statuses = await client.getSessionStatus();
-          const status = statuses[bridge.opencodeSessionId] ?? null;
+          const status = await resolveSessionStatus(client, bridge.opencodeSessionId, statuses);
           lastStatus = status;
 
           if (isTerminalOpencodeStatus(status)) {
@@ -499,7 +500,7 @@ export function createBridgeMcpServer(ctx: RegisterContext): McpServer {
 
         while (Date.now() - startTime < input.timeoutMs) {
           const statuses = await client.getSessionStatus();
-          const status = statuses[opencodeSessionId] ?? null;
+          const status = await resolveSessionStatus(client, opencodeSessionId, statuses);
           lastStatus = status;
 
           if (isTerminalOpencodeStatus(status)) {
@@ -656,7 +657,7 @@ export function createBridgeMcpServer(ctx: RegisterContext): McpServer {
 
         while (Date.now() - startTime < input.timeoutMs) {
           const statuses = await client.getSessionStatus();
-          const status = statuses[opencodeSessionId] ?? null;
+          const status = await resolveSessionStatus(client, opencodeSessionId, statuses);
           lastStatus = status;
 
           if (isTerminalOpencodeStatus(status)) {

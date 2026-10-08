@@ -252,3 +252,4 @@ pnpm run validate  # runs all three
 ## License
 
 MIT
+OpenCode may omit idle sessions from `/session/status`. The bridge only infers completion when the latest assistant message has a completion timestamp and `finish: stop`, without an error, and a second status check still shows no active session. Missing status alone never implies success.
