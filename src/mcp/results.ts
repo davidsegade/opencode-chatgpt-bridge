@@ -1,6 +1,6 @@
 import type { JsonValue, ToolResult } from "../types.js";
 
-export function toolResult<T extends JsonValue>(structuredContent: T): ToolResult<T> {
+export function toolResult<T extends Record<string, unknown>>(structuredContent: T): ToolResult<T> {
   return {
     structuredContent,
     content: [{ type: "text", text: JSON.stringify(structuredContent, null, 2) }]
@@ -11,7 +11,7 @@ export function errorResult(message: string): ToolResult<{ ok: false; error: str
   return toolResult({ ok: false, error: message });
 }
 
-export async function safeTool<T extends JsonValue>(fn: () => Promise<T>): Promise<ToolResult<T | { ok: false; error: string }>> {
+export async function safeTool<T extends Record<string, unknown>>(fn: () => Promise<T>): Promise<ToolResult<T | { ok: false; error: string }>> {
   try {
     return toolResult(await fn());
   } catch (error) {
