@@ -28,13 +28,14 @@ ChatGPT → IA DEV Bridge → opencode → filesystem real → Git real → test
 The `ia_dev_run_task` tool implements this flow:
 1. Validates repo exists and is a real Git repo
 2. Verifies Git top-level matches requested path
-3. Captures initial HEAD and status
-4. Requires clean repo (by default)
-5. Blocks writing to main/master (by default)
-6. Creates NEW opencode session on current server
-7. Sends prompt, waits for terminal state using correct status detection
-8. Compares physical HEAD, staged and unstaged patches, and untracked content hashes/modes before and after execution
-9. Returns success only for idle/completed with a changed physical snapshot; error/cancelled and incomplete verification fail
+3. Requires clean repo (by default)
+4. Blocks writing to main/master (by default)
+5. Loads the `.ia-dev.yml` profile — the repo must have one and its `write_paths` must not be empty
+6. Captures initial HEAD and status
+7. Creates NEW opencode session on current server
+8. Sends prompt, waits for terminal state using correct status detection
+9. Compares physical HEAD, staged and unstaged patches, and untracked content hashes/modes before and after execution
+10. Returns success only for idle/completed with a changed physical snapshot; error/cancelled and incomplete verification fail
 
 `requireClean` defaults to true and is an entry precondition. With `requireClean:false`, unchanged preexisting edits do not count as task changes. Unreadable untracked files prevent successful verification. The snapshot comparison detects repository changes, but does not attribute concurrent edits by other processes to a particular agent.
 
@@ -48,15 +49,24 @@ Multiple opencode servers can run on different ports. Sessions created on one se
 
 ### The Solution
 
-Every bridge session stores its `baseUrl` (the opencode server it was created on). Before any session-specific operation, the bridge verifies:
+Every bridge session stores its `baseUrl` (the opencode server it was created on). Before any session-specific operation, the bridge compares it with the current managed server:
 
 ```
 persistedSession.baseUrl === currentManagedServer.baseUrl
 ```
 
-If they differ → **`SERVER_MISMATCH` error**
+If they differ, the bridge attempts a **fail-closed recovery** (see `src/opencode/recovery.ts`):
 
-**Operations that enforce this:**
+1. Ask the current managed server for `session/{opencodeSessionId}`
+2. The returned session id must equal the persisted `opencodeSessionId`
+3. The returned `session.directory` must resolve (realpath) to the persisted `repoPath`
+4. Only then the persisted `baseUrl` is rebound to the current server
+
+Recovery outcomes:
+- Session missing on the managed server → the server's own error propagates, nothing is rebound
+- Id or project mismatch → **`SESSION_PROJECT_MISMATCH`** error, nothing is rebound
+
+**Operations that verify the binding:**
 - `opencode_get_session_status`
 - `opencode_send_message`
 - `opencode_get_messages`
@@ -66,7 +76,7 @@ If they differ → **`SERVER_MISMATCH` error**
 - `opencode_wait_for_session`
 - Any operation using `opencodeSessionId`
 
-**Operations that do NOT enforce (repo-level):**
+**Operations that do NOT verify (repo-level):**
 - `opencode_read_file`
 - `opencode_find_files`
 - `opencode_vcs_status`
@@ -78,9 +88,22 @@ If they differ → **`SERVER_MISMATCH` error**
 
 ### Practical Implications
 
-- **Changing the managed server baseUrl** makes previous sessions fail the binding check. A restart that preserves the same URL is not detected by this check
-- You **must create a new session** after any server change
-- Old sessions in `~/.opencode-chatgpt-bridge/sessions.json` become stale and will return `SERVER_MISMATCH`
+- A restart that changes the managed server port **rebinds existing sessions automatically**, as long as the session still exists and belongs to the same project directory
+- Stale sessions that no longer exist on the server still fail, now with the server's own error instead of `SERVER_MISMATCH`
+- A session whose project directory no longer matches is rejected with `SESSION_PROJECT_MISMATCH`
+- Recovery never crosses projects: the directory check always runs before rebinding
+
+---
+
+## IA DEV Profile (`.ia-dev.yml`)
+
+`ia_dev_run_task` refuses to launch unless the target repo contains a valid `.ia-dev.yml` (copy `.ia-dev.yml.example`). The schema lives in `src/config/schema.ts`, loading and access checks in `src/security/profile.ts`.
+
+- `version` must be `"2.1"`; `profile` is one of `code-change|bugfix|refactor|test|docs|config`; `goal` needs at least 10 characters
+- `models.author` and `models.reviewer` are required and must be different (free models in practice)
+- `paths` uses the 4-list permission model: `context_paths` (readable), `write_paths` (modifiable, empty = no writes allowed), `protected_paths` (never written), `sensitive_paths` (never read)
+- `limits` and `commands` are optional and fall back to defaults
+- The tool fails before sending any prompt when the profile is missing or `write_paths` is empty
 
 ---
 
@@ -118,20 +141,20 @@ Helpers in `src/types.ts`:
 | `bridge_health` | Check bridge config and managed opencode processes |
 | `list_projects` | List Git repos under allowed roots |
 
-### Session Tools (enforce server binding)
+### Session Tools (verify server binding, recover after restart)
 | Tool | Purpose |
 |------|---------|
 | `opencode_start` | Start/reuse opencode server for a repo |
 | `opencode_stop` | Stop managed opencode servers |
 | `opencode_create_session` | Create new opencode session → returns `bridgeSessionId` |
 | `opencode_list_sessions` | List bridge sessions |
-| `opencode_get_session_status` | Get session status (enforces server binding) |
-| `opencode_send_message` | Send prompt to session (enforces server binding) |
-| `opencode_get_messages` | Fetch session messages (enforces server binding) |
-| `opencode_get_diff` | Fetch session diff (enforces server binding) |
-| `opencode_abort` | Abort running session (enforces server binding) |
-| `opencode_respond_permission` | Respond to permission prompt (enforces server binding) |
-| `opencode_wait_for_session` | Poll until terminal state (enforces server binding) |
+| `opencode_get_session_status` | Get session status (verifies binding, recovers after restart) |
+| `opencode_send_message` | Send prompt to session (verifies binding, recovers after restart) |
+| `opencode_get_messages` | Fetch session messages (verifies binding, recovers after restart) |
+| `opencode_get_diff` | Fetch session diff (verifies binding, recovers after restart) |
+| `opencode_abort` | Abort running session (verifies binding, recovers after restart) |
+| `opencode_respond_permission` | Respond to permission prompt (verifies binding, recovers after restart) |
+| `opencode_wait_for_session` | Poll until terminal state (verifies binding, recovers after restart) |
 | `opencode_launch_task` | Create session + send prompt + wait + return diff |
 
 ### Repo-Level Tools (no server binding)

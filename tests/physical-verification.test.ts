@@ -12,12 +12,26 @@ function git(...args: string[]) { return execFileSync("git", ["-C", repo, ...arg
 beforeEach(async () => {
   repo = await mkdtemp(join(tmpdir(), "ia-physical-"));
   git("init", "-b", "feature"); git("config", "user.name", "Test"); git("config", "user.email", "test@example.invalid");
+  await writeFile(join(repo, ".ia-dev.yml"), [
+    'version: "2.1"',
+    'profile: "code-change"',
+    'goal: "Fixture profile for physical verification tests"',
+    "paths:",
+    "  context_paths:",
+    '    - "**/*"',
+    "  write_paths:",
+    '    - "**/*"',
+    "models:",
+    '  author: "mimo-v2.6-flash-free"',
+    '  reviewer: "space-bunny-free"',
+    ""
+  ].join("\n"));
   await writeFile(join(repo, "tracked.txt"), "original\n\n"); git("add", "."); git("commit", "-m", "fixture");
 });
 afterEach(async () => { await rm(repo, { recursive: true, force: true }); });
 function bridge(action: () => Promise<unknown> = async () => {}, status = { type: "idle" }) {
-  const client = { createSession: vi.fn(async () => ({ id: "s" })), sendMessage: vi.fn(action), getSessionStatus: async () => ({ s: status }), getMessages: async () => [], getDiff: async () => [{ diff: "claimed change" }] };
-  const server = createBridgeMcpServer({ config: { allowedRoots: [repo] } as any, processManager: { ensure: async () => ({ baseUrl: "http://localhost:1" }), clientFor: () => client } as any, state: { createSession: async (x: unknown) => x, getSession: async () => ({ repoPath: repo, baseUrl: "http://localhost:2" }) } as any });
+  const client = { createSession: vi.fn(async () => ({ id: "s" })), sendMessage: vi.fn(action), getSessionStatus: async () => ({ s: status }), getMessages: async () => [], getDiff: vi.fn(async () => [{ diff: "claimed change" }]), getSession: vi.fn(async (sessionId: string) => ({ id: sessionId, directory: repo })) };
+  const server = createBridgeMcpServer({ config: { allowedRoots: [repo] } as any, processManager: { ensure: async () => ({ baseUrl: "http://localhost:1" }), clientFor: () => client } as any, state: { createSession: async (x: unknown) => x, getSession: async () => ({ opencodeSessionId: "ses_old", repoPath: repo, baseUrl: "http://localhost:2" }), updateSession: async (_id: string, patch: Record<string, unknown>) => ({ opencodeSessionId: "ses_old", repoPath: repo, baseUrl: "http://localhost:1", ...patch }) } as any });
   const tool = (server as any)._registeredTools.ia_dev_run_task;
   return { server, client, run: async (extra = {}) => (await tool.handler(tool.inputSchema.parse({ repoPath: repo, prompt: "test", includeMessages: false, ...extra }))).structuredContent };
 }
@@ -61,9 +75,45 @@ describe("physical task verification", () => {
   it.each(["main", "master"])("blocks %s before launching", async name => {
     git("branch", "-m", name); const b = bridge(); expect((await b.run()).error).toContain("protected branch"); expect(b.client.sendMessage).not.toHaveBeenCalled();
   });
-  it("preserves SERVER_MISMATCH in the result and does not query the wrong server", async () => {
+  it("recovers a session on the current managed server after a restart", async () => {
     const b = bridge(); const tool = (b.server as any)._registeredTools.opencode_get_messages;
-    const r = await tool.handler(tool.inputSchema.parse({ bridgeSessionId: "old" })); expect(r.structuredContent.code).toBe("SERVER_MISMATCH");
+    const r = await tool.handler(tool.inputSchema.parse({ bridgeSessionId: "old" }));
+    expect(r.structuredContent.code).toBeUndefined();
+    expect(r.structuredContent.messages).toEqual([]);
+    expect(r.structuredContent.managedServer).toBe("http://localhost:1");
+  });
+  it("does not rebind a session that belongs to a different project", async () => {
+    const b = bridge(); b.client.getSession.mockResolvedValue({ id: "ses_old", directory: tmpdir() });
+    const tool = (b.server as any)._registeredTools.opencode_get_messages;
+    const r = await tool.handler(tool.inputSchema.parse({ bridgeSessionId: "old" }));
+    expect(r.structuredContent.code).toBe("SESSION_PROJECT_MISMATCH");
+    expect(b.client.getDiff).not.toHaveBeenCalled();
+  });
+  it("fails before launching when the repo has no .ia-dev.yml profile", async () => {
+    await rm(join(repo, ".ia-dev.yml"));
+    const b = bridge(async () => writeFile(join(repo, "tracked.txt"), "new edit"));
+    const r = await b.run({ requireClean: false });
+    expect(r.ok).toBe(false);
+    expect(r.error).toContain(".ia-dev.yml");
+    expect(b.client.sendMessage).not.toHaveBeenCalled();
+  });
+  it("fails before launching when the profile allows no writes", async () => {
+    await writeFile(join(repo, ".ia-dev.yml"), [
+      'version: "2.1"',
+      'profile: "code-change"',
+      'goal: "Fixture profile that forbids every write"',
+      "paths:",
+      "  write_paths: []",
+      "models:",
+      '  author: "mimo-v2.6-flash-free"',
+      '  reviewer: "space-bunny-free"',
+      ""
+    ].join("\n"));
+    const b = bridge(async () => writeFile(join(repo, "tracked.txt"), "new edit"));
+    const r = await b.run({ requireClean: false });
+    expect(r.ok).toBe(false);
+    expect(r.error).toContain("write_paths");
+    expect(b.client.sendMessage).not.toHaveBeenCalled();
   });
   it("keeps staged changes when excluding untracked", async () => {
     await writeFile(join(repo, "tracked.txt"), "staged edit"); git("add", "."); await writeFile(join(repo, "new.txt"), "untracked");

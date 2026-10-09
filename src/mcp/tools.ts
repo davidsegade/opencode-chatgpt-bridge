@@ -1,9 +1,10 @@
+import { verifyRecoveredSession } from "../opencode/recovery.js";
 import { resolveSessionStatus } from "../opencode/status.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod/v4";
 import type { BridgeConfig, JsonValue, OpencodeStatus } from "../types.js";
 import { isTerminalOpencodeStatus, isSuccessfulTerminalOpencodeStatus } from "../types.js";
-import { listProjects, validateRepoPath } from "../security/paths.js";
+import { listProjects, validateRepoPath, validateProfileExists } from "../security/paths.js";
 import { OpencodeProcessManager } from "../opencode/process.js";
 import { StateStore } from "../state/store.js";
 import { safeTool } from "./results.js";
@@ -30,21 +31,13 @@ function json(value: unknown): JsonValue {
 }
 
 async function getSessionClient(ctx: RegisterContext, bridgeSessionId: string) {
-  const bridge = await ctx.state.getSession(bridgeSessionId);
+  let bridge = await ctx.state.getSession(bridgeSessionId);
   const managed = await ctx.processManager.ensure(bridge.repoPath);
-
-  if (bridge.baseUrl !== managed.baseUrl) {
-    const error = Object.assign(
-      new Error(
-        `Session ${bridgeSessionId} belongs to server ${bridge.baseUrl} but current managed server for ${bridge.repoPath} is ${managed.baseUrl}. ` +
-        `Create a new session with the current server.`
-      ),
-      { code: "SERVER_MISMATCH" as const }
-    );
-    throw error;
-  }
-
   const client = ctx.processManager.clientFor(managed);
+  if (bridge.baseUrl !== managed.baseUrl) {
+    await verifyRecoveredSession(client, bridge.opencodeSessionId, bridge.repoPath);
+    bridge = await ctx.state.updateSession(bridgeSessionId, { baseUrl: managed.baseUrl });
+  }
   return { bridge, managed, client };
 }
 
@@ -173,7 +166,7 @@ export function createBridgeMcpServer(ctx: RegisterContext): McpServer {
     "opencode_get_session_status",
     {
       title: "Get opencode session status",
-      description: "Get status for an opencode session or all sessions in that repo. Fails if session belongs to a different opencode server.",
+      description: "Get status for an opencode session or all sessions in that repo. Fails if the session cannot be recovered on the current managed server.",
       inputSchema: { bridgeSessionId: z.string().min(1) },
       annotations: { readOnlyHint: true, openWorldHint: false }
     },
@@ -194,7 +187,7 @@ export function createBridgeMcpServer(ctx: RegisterContext): McpServer {
     "opencode_send_message",
     {
       title: "Send opencode message",
-      description: "Send a prompt to an opencode session. Use async=true for long-running coding tasks. Fails if session belongs to a different opencode server.",
+      description: "Send a prompt to an opencode session. Use async=true for long-running coding tasks. Fails if the session cannot be recovered on the current managed server.",
       inputSchema: {
         bridgeSessionId: z.string().min(1),
         text: z.string().min(1),
@@ -229,7 +222,7 @@ export function createBridgeMcpServer(ctx: RegisterContext): McpServer {
     "opencode_get_messages",
     {
       title: "Get opencode messages",
-      description: "Fetch messages from a bridge session. Fails if session belongs to a different opencode server.",
+      description: "Fetch messages from a bridge session. Fails if the session cannot be recovered on the current managed server.",
       inputSchema: { bridgeSessionId: z.string().min(1), limit: z.number().int().min(1).max(200).optional() },
       annotations: { readOnlyHint: true, openWorldHint: false }
     },
@@ -244,7 +237,7 @@ export function createBridgeMcpServer(ctx: RegisterContext): McpServer {
     "opencode_get_diff",
     {
       title: "Get opencode diff",
-      description: "Fetch file diffs for a bridge session. Call this before summarizing completed code work. Fails if session belongs to a different opencode server.",
+      description: "Fetch file diffs for a bridge session. Call this before summarizing completed code work. Fails if the session cannot be recovered on the current managed server.",
       inputSchema: { bridgeSessionId: z.string().min(1), messageID: z.string().optional() },
       annotations: { readOnlyHint: true, openWorldHint: false }
     },
@@ -259,7 +252,7 @@ export function createBridgeMcpServer(ctx: RegisterContext): McpServer {
     "opencode_abort",
     {
       title: "Abort opencode session",
-      description: "Abort a running opencode session. Fails if session belongs to a different opencode server.",
+      description: "Abort a running opencode session. Fails if the session cannot be recovered on the current managed server.",
       inputSchema: { bridgeSessionId: z.string().min(1) },
       annotations: { readOnlyHint: false, openWorldHint: false }
     },
@@ -274,7 +267,7 @@ export function createBridgeMcpServer(ctx: RegisterContext): McpServer {
     "opencode_respond_permission",
     {
       title: "Respond to opencode permission",
-      description: "Allow or deny an opencode permission request surfaced in the session messages/status. Fails if session belongs to a different opencode server.",
+      description: "Allow or deny an opencode permission request surfaced in the session messages/status. Fails if the session cannot be recovered on the current managed server.",
       inputSchema: {
         bridgeSessionId: z.string().min(1),
         permissionId: z.string().min(1),
@@ -374,7 +367,7 @@ export function createBridgeMcpServer(ctx: RegisterContext): McpServer {
     "opencode_wait_for_session",
     {
       title: "Wait for opencode session completion",
-      description: "Poll an opencode session until it reaches a terminal state (idle/completed/error/cancelled) or timeout. Returns final status, messages, and diff. Fails if session belongs to a different opencode server.",
+      description: "Poll an opencode session until it reaches a terminal state (idle/completed/error/cancelled) or timeout. Returns final status, messages, and diff. Fails if the session cannot be recovered on the current managed server.",
       inputSchema: {
         bridgeSessionId: z.string().min(1),
         timeoutMs: z.number().int().min(1000).max(600000).default(120000),
@@ -619,6 +612,12 @@ export function createBridgeMcpServer(ctx: RegisterContext): McpServer {
 
         if (!input.allowMain) {
           await assertNotMain(validated);
+        }
+
+        const profile = await validateProfileExists(validated);
+
+        if (profile.paths.write_paths.length === 0) {
+          throw new Error("Profile has empty write_paths. Define write_paths in .ia-dev.yml to allow modifications.");
         }
 
         const initialStatus = await getGitStatus(validated);

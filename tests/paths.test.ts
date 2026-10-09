@@ -1,8 +1,9 @@
-import { mkdtemp, mkdir, realpath } from "node:fs/promises";
+import { mkdtemp, mkdir, realpath, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
-import { listProjects, validateRepoPath } from "../src/security/paths.js";
+import { describe, expect, it, beforeEach, afterEach } from "vitest";
+
+import { listProjects, validateRepoPath, validateContextAccess, validateWriteAccess, validateProfileExists } from "../src/security/paths.js";
 
 describe("path security", () => {
   it("allows paths inside allowed roots", async () => {
@@ -23,5 +24,175 @@ describe("path security", () => {
     await mkdir(join(root, "a", ".git"), { recursive: true });
     const projects = await listProjects([root], 2);
     expect(projects.map((p) => p.name)).toContain("a");
+  });
+});
+
+describe("4-list permission model", () => {
+  let repo: string;
+
+  beforeEach(async () => {
+    repo = await mkdtemp(join(tmpdir(), "ia-perm-"));
+    await mkdir(join(repo, ".git"), { recursive: true });
+    // Create .ia-dev.yml with test profile
+    await writeFile(join(repo, ".ia-dev.yml"), `
+version: "2.1"
+profile: "code-change"
+goal: "Test permission model with various paths"
+paths:
+  context_paths:
+    - "src/**/*"
+    - "tests/**/*"
+    - "package.json"
+  write_paths:
+    - "src/routes/**/*"
+    - "tests/**/*"
+  protected_paths:
+    - ".github/**"
+    - "package-lock.json"
+  sensitive_paths:
+    - "**/.env*"
+    - "**/*.key"
+models:
+  author: "mimo-v2.6-flash-free"
+  reviewer: "space-bunny-free"
+`);
+  });
+
+  afterEach(async () => {
+    await rm(repo, { recursive: true, force: true });
+  });
+
+  it("loads profile successfully", async () => {
+    const profile = await validateProfileExists(repo);
+    expect(profile.version).toBe("2.1");
+    expect(profile.profile).toBe("code-change");
+    expect(profile.paths.context_paths).toContain("src/**/*");
+    expect(profile.paths.write_paths).toContain("src/routes/**/*");
+  });
+
+  it("allows read in context_paths", async () => {
+    const result = await validateContextAccess(repo, [
+      "src/routes/createRoute.ts",
+      "tests/unit.test.ts",
+      "package.json"
+    ]);
+    expect(result.allowed).toBe(true);
+    expect(result.deniedPaths).toEqual([]);
+  });
+
+  it("denies read in sensitive_paths", async () => {
+    const result = await validateContextAccess(repo, [
+      ".env.production",
+      "config/secrets/key.pem",
+      "src/routes/createRoute.ts"
+    ]);
+    expect(result.allowed).toBe(false);
+    expect(result.deniedPaths).toContain(".env.production");
+    expect(result.deniedPaths).toContain("config/secrets/key.pem");
+    expect(result.deniedPaths).not.toContain("src/routes/createRoute.ts");
+  });
+
+  it("allows write in write_paths", async () => {
+    const result = await validateWriteAccess(repo, [
+      "src/routes/createRoute.ts",
+      "tests/auth.test.ts"
+    ]);
+    expect(result.allowed).toBe(true);
+    expect(result.deniedPaths).toEqual([]);
+  });
+
+  it("denies write in protected_paths", async () => {
+    const result = await validateWriteAccess(repo, [
+      ".github/workflows/ci.yml",
+      "package-lock.json",
+      "src/routes/createRoute.ts"
+    ]);
+    expect(result.allowed).toBe(false);
+    expect(result.deniedPaths).toContain(".github/workflows/ci.yml");
+    expect(result.deniedPaths).toContain("package-lock.json");
+    expect(result.deniedPaths).not.toContain("src/routes/createRoute.ts");
+  });
+
+  it("denies write outside write_paths", async () => {
+    const result = await validateWriteAccess(repo, [
+      "src/types/index.ts",
+      "docs/readme.md",
+      "src/routes/createRoute.ts"
+    ]);
+    expect(result.allowed).toBe(false);
+    expect(result.deniedPaths).toContain("src/types/index.ts");
+    expect(result.deniedPaths).toContain("docs/readme.md");
+    expect(result.deniedPaths).not.toContain("src/routes/createRoute.ts");
+  });
+
+  it("empty write_paths denies all writes", async () => {
+    // Create a profile with empty write_paths
+    await writeFile(join(repo, ".ia-dev.yml"), `
+version: "2.1"
+profile: "code-change"
+goal: "Test empty write paths"
+paths:
+  context_paths: ["src/**/*"]
+  write_paths: []
+  protected_paths: [".github/**"]
+  sensitive_paths: ["**/.env*"]
+models:
+  author: "mimo-v2.6-flash-free"
+  reviewer: "space-bunny-free"
+`);
+    const result = await validateWriteAccess(repo, ["src/routes/createRoute.ts"]);
+    expect(result.allowed).toBe(false);
+    expect(result.deniedPaths).toContain("src/routes/createRoute.ts");
+  });
+
+  it("rejects profile with same author and reviewer", async () => {
+    await writeFile(join(repo, ".ia-dev.yml"), `
+version: "2.1"
+profile: "code-change"
+goal: "Test same models"
+paths:
+  context_paths: ["**/*"]
+  write_paths: ["src/**/*"]
+  protected_paths: [".github/**"]
+  sensitive_paths: ["**/.env*"]
+models:
+  author: "mimo-v2.6-flash-free"
+  reviewer: "mimo-v2.6-flash-free"
+`);
+    await expect(validateProfileExists(repo)).rejects.toThrow(/author and reviewer must be different/);
+  });
+
+  it("requires version 2.1", async () => {
+    await writeFile(join(repo, ".ia-dev.yml"), `
+version: "2.0"
+profile: "code-change"
+goal: "Test version"
+paths:
+  context_paths: ["**/*"]
+  write_paths: ["src/**/*"]
+  protected_paths: [".github/**"]
+  sensitive_paths: ["**/.env*"]
+models:
+  author: "mimo-v2.6-flash-free"
+  reviewer: "space-bunny-free"
+`);
+    await expect(validateProfileExists(repo)).rejects.toThrow();
+  });
+
+  it("requires goal minimum length", async () => {
+    await writeFile(join(repo, ".ia-dev.yml"), `
+version: "2.1"
+profile: "code-change"
+goal: "short"
+paths:
+  context_paths: ["**/*"]
+  write_paths: ["src/**/*"]
+  protected_paths: [".github/**"]
+  sensitive_paths: ["**/.env*"]
+models:
+  author: "mimo-v2.6-flash-free"
+  reviewer: "space-bunny-free"
+`);
+    await expect(validateProfileExists(repo)).rejects.toThrow();
   });
 });

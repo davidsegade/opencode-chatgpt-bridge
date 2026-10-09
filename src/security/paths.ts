@@ -1,11 +1,18 @@
 import { access, readdir, realpath, stat } from "node:fs/promises";
 import { constants } from "node:fs";
 import { basename, isAbsolute, join, relative, resolve } from "node:path";
+import { loadProfile, validateReadAccess, validateWriteAccess as profileValidateWriteAccess } from "./profile.js";
+import type { IADevProfile } from "../config/schema.js";
 
 export type ProjectSummary = {
   name: string;
   path: string;
   isGitRepo: boolean;
+};
+
+export type AccessValidationResult = {
+  allowed: boolean;
+  deniedPaths: string[];
 };
 
 export async function assertDirectory(path: string): Promise<void> {
@@ -72,4 +79,41 @@ export async function listProjects(allowedRoots: string[], depth = 2): Promise<P
 
   await Promise.all(allowedRoots.map((root) => walk(root, depth)));
   return [...projects.values()].sort((a, b) => a.path.localeCompare(b.path));
+}
+
+export async function validateContextAccess(repoPath: string, filePaths: string[]): Promise<AccessValidationResult> {
+  const profile = await loadProfile(repoPath);
+  const deniedPaths = filePaths.filter((p) => !validateReadAccess(profile, p));
+  return {
+    allowed: deniedPaths.length === 0,
+    deniedPaths
+  };
+}
+
+export async function validateWriteAccess(repoPath: string, filePaths: string[]): Promise<AccessValidationResult> {
+  const profile = await loadProfile(repoPath);
+  const deniedPaths = filePaths.filter((p) => !profileValidateWriteAccess(profile, p));
+  return {
+    allowed: deniedPaths.length === 0,
+    deniedPaths
+  };
+}
+
+export async function getProfilePaths(repoPath: string): Promise<{
+  context_paths: string[];
+  write_paths: string[];
+  protected_paths: string[];
+  sensitive_paths: string[];
+}> {
+  const profile = await loadProfile(repoPath);
+  return {
+    context_paths: profile.paths.context_paths,
+    write_paths: profile.paths.write_paths,
+    protected_paths: profile.paths.protected_paths,
+    sensitive_paths: profile.paths.sensitive_paths
+  };
+}
+
+export async function validateProfileExists(repoPath: string): Promise<IADevProfile> {
+  return await loadProfile(repoPath);
 }

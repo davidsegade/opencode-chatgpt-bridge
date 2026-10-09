@@ -4,7 +4,7 @@ import { createBridgeMcpServer } from "../src/mcp/tools.js";
 import type { BridgeConfig } from "../src/types.js";
 import { OpencodeProcessManager } from "../src/opencode/process.js";
 import { StateStore } from "../src/state/store.js";
-import { validateRepoPath } from "../src/security/paths.js";
+import { validateRepoPath, validateProfileExists } from "../src/security/paths.js";
 import * as gitModule from "../src/git/repository.js";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -15,7 +15,8 @@ vi.mock("../src/security/paths.js", async (importOriginal) => {
   return {
     ...actual,
     validateRepoPath: vi.fn(),
-    listProjects: vi.fn()
+    listProjects: vi.fn(),
+    validateProfileExists: vi.fn()
   };
 });
 
@@ -79,7 +80,8 @@ function createMockContext(overrides: Partial<{
     readFile: vi.fn().mockResolvedValue({ content: "test" }),
     findFiles: vi.fn().mockResolvedValue(["test.ts"]),
     fileStatus: vi.fn().mockResolvedValue([]),
-    vcs: vi.fn().mockResolvedValue({})
+    vcs: vi.fn().mockResolvedValue({}),
+    getSession: vi.fn(async (sessionId: string) => ({ id: sessionId, directory: "/tmp/test/repo" }))
   };
 
   const processManager = {
@@ -110,7 +112,7 @@ function createMockContext(overrides: Partial<{
     createSession: vi.fn().mockResolvedValue(mockSession),
     getSession: vi.fn().mockResolvedValue(mockSession),
     listSessions: vi.fn().mockResolvedValue([mockSession]),
-    updateSession: vi.fn().mockResolvedValue(mockSession),
+    updateSession: vi.fn(async (_id: string, patch: Record<string, unknown>) => ({ ...mockSession, ...patch })),
     ...overrides.state
   };
 
@@ -144,6 +146,21 @@ function createMockContext(overrides: Partial<{
   gitModule.assertClean.mockResolvedValue(undefined);
   gitModule.assertNotMain.mockResolvedValue(undefined);
 
+  (validateProfileExists as any).mockResolvedValue({
+    version: "2.1",
+    profile: "code-change",
+    goal: "Test profile used by MCP tool tests",
+    paths: {
+      context_paths: ["**/*"],
+      write_paths: ["src/**/*"],
+      protected_paths: [".github/**"],
+      sensitive_paths: ["**/.env*"]
+    },
+    models: { author: "mimo-v2.6-flash-free", reviewer: "space-bunny-free" },
+    limits: { max_context_tokens: 4000, max_attempts: 3, timeout_ms: 300000 },
+    commands: {}
+  });
+
   // Override with test-specific mocks if provided
   if (overrides.gitMocks) {
     if (overrides.gitMocks.validateGitRepo) gitModule.validateGitRepo.mockImplementation(overrides.gitMocks.validateGitRepo);
@@ -165,24 +182,31 @@ function createMockContextWithMismatch(overrides: Partial<{
 
   const oldBaseUrl = "http://127.0.0.1:4096";
   const newBaseUrl = "http://127.0.0.1:4097";
+  const projectDir = process.cwd();
+
+  const sessionRecord = (patch: Record<string, unknown> = {}) => ({
+    bridgeSessionId: "bridge_test123",
+    opencodeSessionId: "ses_test123",
+    repoPath: projectDir,
+    baseUrl: oldBaseUrl,
+    title: "Test Session",
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    ...patch
+  });
 
   const oldSession = {
     ...state,
-    getSession: vi.fn().mockResolvedValue({
-      bridgeSessionId: "bridge_test123",
-      opencodeSessionId: "ses_test123",
-      repoPath: "/tmp/test/repo",
-      baseUrl: oldBaseUrl,
-      title: "Test Session",
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString()
-    })
+    getSession: vi.fn().mockResolvedValue(sessionRecord()),
+    updateSession: vi.fn(async (_id: string, patch: Record<string, unknown>) => sessionRecord(patch))
   };
+
+  mockClient.getSession.mockResolvedValue({ id: "ses_test123", directory: projectDir });
 
   const newProcessManager = {
     ...processManager,
     ensure: vi.fn().mockResolvedValue({
-      repoPath: "/tmp/test/repo",
+      repoPath: projectDir,
       baseUrl: newBaseUrl,
       username: "opencode",
       password: "test-password",
@@ -400,8 +424,8 @@ describe("MCP Tools - launch_task", () => {
   });
 });
 
-describe("MCP Tools - session server mismatch", () => {
-  it("throws SERVER_MISMATCH when session baseUrl differs from managed server", async () => {
+describe("MCP Tools - session server recovery", () => {
+  it("recovers a session after a managed server restart when identity and project match", async () => {
     const { config, processManager, state, mockClient } = createMockContextWithMismatch();
     const server = createBridgeMcpServer({ config, processManager: processManager as any, state: state as any });
 
@@ -413,13 +437,13 @@ describe("MCP Tools - session server mismatch", () => {
     });
 
     const content = result.structuredContent as any;
-    expect(content.ok).toBe(false);
-    expect(content.error).toContain("4096");
-    expect(content.error).toContain("4097");
-    expect(content.error).toContain("Create a new session");
+    expect(content.code).toBeUndefined();
+    expect(content.managedServer).toBe("http://127.0.0.1:4097");
+    expect(mockClient.getSession).toHaveBeenCalledWith("ses_test123");
+    expect(state.updateSession).toHaveBeenCalledWith("bridge_test123", { baseUrl: "http://127.0.0.1:4097" });
   });
 
-  it("throws SERVER_MISMATCH for opencode_send_message when session belongs to different server", async () => {
+  it("sends messages to the current managed server after recovery", async () => {
     const { config, processManager, state, mockClient } = createMockContextWithMismatch();
     const server = createBridgeMcpServer({ config, processManager: processManager as any, state: state as any });
 
@@ -430,14 +454,16 @@ describe("MCP Tools - session server mismatch", () => {
     });
 
     const content = result.structuredContent as any;
-    expect(content.ok).toBe(false);
-    expect(content.error).toContain("4096");
-    expect(content.error).toContain("4097");
+    expect(content.ok).toBe(true);
+    expect(content.managedServer).toBe("http://127.0.0.1:4097");
+    expect(mockClient.sendMessage).toHaveBeenCalledWith(expect.objectContaining({ sessionId: "ses_test123" }));
   });
 
-  it("throws SERVER_MISMATCH for opencode_get_messages when session belongs to different server", async () => {
+  it("rejects recovery when the recovered session belongs to a different project", async () => {
     const { config, processManager, state, mockClient } = createMockContextWithMismatch();
     const server = createBridgeMcpServer({ config, processManager: processManager as any, state: state as any });
+
+    mockClient.getSession.mockResolvedValue({ id: "ses_test123", directory: tmpdir() });
 
     const tool = (server as any)._registeredTools?.opencode_get_messages;
     const result = await tool.handler({
@@ -446,13 +472,15 @@ describe("MCP Tools - session server mismatch", () => {
 
     const content = result.structuredContent as any;
     expect(content.ok).toBe(false);
-    expect(content.error).toContain("4096");
-    expect(content.error).toContain("4097");
+    expect(content.code).toBe("SESSION_PROJECT_MISMATCH");
+    expect(state.updateSession).not.toHaveBeenCalled();
   });
 
-  it("throws SERVER_MISMATCH for opencode_get_diff when session belongs to different server", async () => {
+  it("keeps the managed server error when the session no longer exists", async () => {
     const { config, processManager, state, mockClient } = createMockContextWithMismatch();
     const server = createBridgeMcpServer({ config, processManager: processManager as any, state: state as any });
+
+    mockClient.getSession.mockRejectedValue(new Error("session not found on managed server"));
 
     const tool = (server as any)._registeredTools?.opencode_get_diff;
     const result = await tool.handler({
@@ -461,55 +489,8 @@ describe("MCP Tools - session server mismatch", () => {
 
     const content = result.structuredContent as any;
     expect(content.ok).toBe(false);
-    expect(content.error).toContain("4096");
-    expect(content.error).toContain("4097");
-  });
-
-  it("throws SERVER_MISMATCH for opencode_abort when session belongs to different server", async () => {
-    const { config, processManager, state, mockClient } = createMockContextWithMismatch();
-    const server = createBridgeMcpServer({ config, processManager: processManager as any, state: state as any });
-
-    const tool = (server as any)._registeredTools?.opencode_abort;
-    const result = await tool.handler({
-      bridgeSessionId: "bridge_test123"
-    });
-
-    const content = result.structuredContent as any;
-    expect(content.ok).toBe(false);
-    expect(content.error).toContain("4096");
-    expect(content.error).toContain("4097");
-  });
-
-  it("throws SERVER_MISMATCH for opencode_respond_permission when session belongs to different server", async () => {
-    const { config, processManager, state, mockClient } = createMockContextWithMismatch();
-    const server = createBridgeMcpServer({ config, processManager: processManager as any, state: state as any });
-
-    const tool = (server as any)._registeredTools?.opencode_respond_permission;
-    const result = await tool.handler({
-      bridgeSessionId: "bridge_test123",
-      permissionId: "perm_123",
-      response: "allow"
-    });
-
-    const content = result.structuredContent as any;
-    expect(content.ok).toBe(false);
-    expect(content.error).toContain("4096");
-    expect(content.error).toContain("4097");
-  });
-
-  it("throws SERVER_MISMATCH for opencode_wait_for_session when session belongs to different server", async () => {
-    const { config, processManager, state, mockClient } = createMockContextWithMismatch();
-    const server = createBridgeMcpServer({ config, processManager: processManager as any, state: state as any });
-
-    const tool = (server as any)._registeredTools?.opencode_wait_for_session;
-    const result = await tool.handler({
-      bridgeSessionId: "bridge_test123"
-    });
-
-    const content = result.structuredContent as any;
-    expect(content.ok).toBe(false);
-    expect(content.error).toContain("4096");
-    expect(content.error).toContain("4097");
+    expect(content.error).toContain("session not found on managed server");
+    expect(state.updateSession).not.toHaveBeenCalled();
   });
 
   it("allows repo-level operations (opencode_read_file) even with baseUrl mismatch", async () => {
@@ -527,6 +508,7 @@ describe("MCP Tools - session server mismatch", () => {
     const content = result.structuredContent as any;
     expect(content).toBeDefined();
     expect(content.file).toEqual({ content: "test file" });
+    expect(mockClient.getSession).not.toHaveBeenCalled();
   });
 
   it("allows repo-level operations (opencode_find_files) even with baseUrl mismatch", async () => {
@@ -544,6 +526,7 @@ describe("MCP Tools - session server mismatch", () => {
     const content = result.structuredContent as any;
     expect(content).toBeDefined();
     expect(content.files).toEqual(["test.txt"]);
+    expect(mockClient.getSession).not.toHaveBeenCalled();
   });
 });
 
