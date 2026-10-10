@@ -93,7 +93,7 @@ describe("Free Model Registry", () => {
 describe("live free-only inventory (real OpenCode 1.18.35 /provider shape)", () => {
   const primary = validateFreeModel("mimo-v2.6-flash-free");
   // Shape taken from @opencode-ai/sdk 1.18.35 generated types:
-  // cost.cache_read / cost.cache_write are FLAT and OPTIONAL; status is OPTIONAL.
+  // cost.cache_read / cost.cache_write are FLAT and REQUIRED to be zero (fail closed); status is OPTIONAL.
   function modelRecord(overrides: Record<string, unknown> = {}) {
     return {
       id: primary.modelId,
@@ -121,10 +121,20 @@ describe("live free-only inventory (real OpenCode 1.18.35 /provider shape)", () 
   it("accepts a connected model whose advertised tariffs are all zero", () => {
     expect(validateLiveFreeModels(inventory(), [primary])).toEqual([primary]);
   });
-  it("accepts a model that omits the optional cache tariffs", () => {
+  it("rejects a model that omits cache_read", () => {
+    const data = inventory();
+    (data.all[0]!.models[primary.modelId]!.cost as Record<string, unknown>) = { input: 0, output: 0, cache_write: 0 };
+    expect(() => validateLiveFreeModels(data, [primary])).toThrow(/verified zero-cost/);
+  });
+  it("rejects a model that omits cache_write", () => {
+    const data = inventory();
+    (data.all[0]!.models[primary.modelId]!.cost as Record<string, unknown>) = { input: 0, output: 0, cache_read: 0 };
+    expect(() => validateLiveFreeModels(data, [primary])).toThrow(/verified zero-cost/);
+  });
+  it("rejects a model that omits both cache tariffs", () => {
     const data = inventory();
     (data.all[0]!.models[primary.modelId]!.cost as Record<string, unknown>) = { input: 0, output: 0 };
-    expect(validateLiveFreeModels(data, [primary])).toEqual([primary]);
+    expect(() => validateLiveFreeModels(data, [primary])).toThrow(/verified zero-cost/);
   });
   it("accepts a model with no status field at all", () => {
     const data = inventory();
@@ -141,7 +151,22 @@ describe("live free-only inventory (real OpenCode 1.18.35 /provider shape)", () 
   });
   it("rejects a nonzero context_over_200k tier", () => {
     const data = inventory();
-    (data.all[0]!.models[primary.modelId]!.cost as Record<string, unknown>).context_over_200k = { input: 0.5, output: 0 };
+    (data.all[0]!.models[primary.modelId]!.cost as Record<string, unknown>).context_over_200k = { input: 0.5, output: 0, cache_read: 0, cache_write: 0 };
+    expect(() => validateLiveFreeModels(data, [primary])).toThrow(/verified zero-cost/);
+  });
+  it("accepts a model with an explicit zero context_over_200k tier", () => {
+    const data = inventory();
+    (data.all[0]!.models[primary.modelId]!.cost as Record<string, unknown>).context_over_200k = { input: 0, output: 0, cache_read: 0, cache_write: 0 };
+    expect(validateLiveFreeModels(data, [primary])).toEqual([primary]);
+  });
+  it("rejects a nonzero context_over_200k cache_read", () => {
+    const data = inventory();
+    (data.all[0]!.models[primary.modelId]!.cost as Record<string, unknown>).context_over_200k = { input: 0, output: 0, cache_read: 0.01, cache_write: 0 };
+    expect(() => validateLiveFreeModels(data, [primary])).toThrow(/verified zero-cost/);
+  });
+  it("rejects a context_over_200k tier that omits cache tariffs", () => {
+    const data = inventory();
+    (data.all[0]!.models[primary.modelId]!.cost as Record<string, unknown>).context_over_200k = { input: 0, output: 0 };
     expect(() => validateLiveFreeModels(data, [primary])).toThrow(/verified zero-cost/);
   });
   it("rejects a model with no advertised cost block", () => {

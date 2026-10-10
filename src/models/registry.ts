@@ -92,29 +92,36 @@ export function isFreeModel(identifier: string): boolean {
 
 // Mirrors OpenCode 1.18.35 GET /provider (verified against @opencode-ai/sdk 1.18.35
 // generated types). `cost` is optional on the wire; `cache_read`/`cache_write` are
-// flat and optional; `status` is optional; extra keys are ignored by zod.
+// flat and must be explicitly zero (fail closed if absent); `status` is optional;
+// extra keys are ignored by zod.
 const ProviderInventorySchema = z.object({
   connected: z.array(z.string()),
   all: z.array(z.object({ id: z.string(), models: z.record(z.string(), z.unknown()) }))
 });
 
+// Fail closed: cache_read/cache_write must be explicitly advertised as 0.
+// Absence is not proof of zero cost; it means the provider does not report
+// a tariff we can verify. context_over_200k is optional because it only
+// applies to models whose context limit exceeds 200k; when present, all
+// its rates must also be explicitly zero.
 const ZeroRateSchema = z.object({
   input: z.literal(0),
   output: z.literal(0),
-  cache_read: z.literal(0).optional(),
-  cache_write: z.literal(0).optional(),
+  cache_read: z.literal(0),
+  cache_write: z.literal(0),
   context_over_200k: z
     .object({
       input: z.literal(0),
       output: z.literal(0),
-      cache_read: z.literal(0).optional(),
-      cache_write: z.literal(0).optional()
+      cache_read: z.literal(0),
+      cache_write: z.literal(0)
     })
     .optional()
 });
 
 // `cost` absent => no advertised tariff => cannot be proven free => rejected.
-// Every rate the provider does advertise must be exactly zero.
+// Every rate the provider advertises must be exactly zero, including cache
+// reads and writes; absence of a cache rate is treated as unverifiable, not free.
 const ZeroCostModelSchema = z.object({
   id: z.string(),
   cost: ZeroRateSchema,
