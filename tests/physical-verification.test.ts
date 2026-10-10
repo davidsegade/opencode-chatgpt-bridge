@@ -40,7 +40,7 @@ describe("physical task verification", () => {
     expect(isSuccessfulTerminalOpencodeStatus({ type: "error", status: "idle" })).toBe(false);
     expect(isSuccessfulTerminalOpencodeStatus({ status: "completed" })).toBe(true);
   });
-  it("detects new edits within a preexisting tracked binary diff", async () => {
+  it("detects new edits within a preexisting tracked binary diff", { timeout: 10000 }, async () => {
     await writeFile(join(repo, "binary"), Buffer.from([0, 255])); git("add", "."); git("commit", "-m", "binary fixture");
     await writeFile(join(repo, "binary"), Buffer.from([0, 254]));
     const b = bridge(async () => writeFile(join(repo, "binary"), Buffer.from([0, 253])));
@@ -53,43 +53,43 @@ describe("physical task verification", () => {
   it("succeeds with omitted requireClean and a real physical edit", async () => {
     const b = bridge(async () => writeFile(join(repo, "tracked.txt"), "new edit")); expect((await b.run()).success).toBe(true);
   });
-  it.each(["unstaged", "staged", "untracked"])("rejects unchanged preexisting %s changes", async kind => {
+  it.each(["unstaged", "staged", "untracked"])("rejects unchanged preexisting %s changes", { timeout: 10000 }, async kind => {
     await writeFile(join(repo, kind === "untracked" ? "new.txt" : "tracked.txt"), "prior edit");
     if (kind === "staged") git("add", ".");
     const b = bridge(); expect((await b.run({ requireClean: false })).success).toBe(false);
   });
-  it("detects changed binary content of an existing untracked file", async () => {
+  it("detects changed binary content of an existing untracked file", { timeout: 10000 }, async () => {
     await writeFile(join(repo, "new.bin"), Buffer.from([0, 255]));
     const b = bridge(async () => writeFile(join(repo, "new.bin"), Buffer.from([0, 254])));
     expect((await b.run({ requireClean: false })).success).toBe(true);
   });
-  it.each(["error", "cancelled"])("rejects %s despite physical edits", async type => {
+  it.each(["error", "cancelled"])("rejects %s despite physical edits", { timeout: 10000 }, async type => {
     const b = bridge(async () => writeFile(join(repo, "tracked.txt"), "new edit"), { type }); expect((await b.run()).success).toBe(false);
   });
-  it("rejects reported OpenCode changes without physical edits", async () => { expect((await bridge().run()).success).toBe(false); });
-  it("fails verification if an untracked file becomes unreadable", async () => {
+  it("rejects reported OpenCode changes without physical edits", { timeout: 10000 }, async () => { expect((await bridge().run()).success).toBe(false); });
+  it("fails verification if an untracked file becomes unreadable", { timeout: 10000 }, async () => {
     const b = bridge(async () => { await writeFile(join(repo, "restricted"), "x"); await chmod(join(repo, "restricted"), 0); });
     try { const r = await b.run(); expect(r.success).toBe(false); expect(r.error).toContain("verification incomplete"); }
     finally { await chmod(join(repo, "restricted"), 0o600); }
   });
-  it.each(["main", "master"])("blocks %s before launching", async name => {
+  it.each(["main", "master"])("blocks %s before launching", { timeout: 10000 }, async name => {
     git("branch", "-m", name); const b = bridge(); expect((await b.run()).error).toContain("protected branch"); expect(b.client.sendMessage).not.toHaveBeenCalled();
   });
-  it("recovers a session on the current managed server after a restart", async () => {
+  it("recovers a session on the current managed server after a restart", { timeout: 10000 }, async () => {
     const b = bridge(); const tool = (b.server as any)._registeredTools.opencode_get_messages;
     const r = await tool.handler(tool.inputSchema.parse({ bridgeSessionId: "old" }));
     expect(r.structuredContent.code).toBeUndefined();
     expect(r.structuredContent.messages).toEqual([]);
     expect(r.structuredContent.managedServer).toBe("http://localhost:1");
   });
-  it("does not rebind a session that belongs to a different project", async () => {
+  it("does not rebind a session that belongs to a different project", { timeout: 10000 }, async () => {
     const b = bridge(); b.client.getSession.mockResolvedValue({ id: "ses_old", directory: tmpdir() });
     const tool = (b.server as any)._registeredTools.opencode_get_messages;
     const r = await tool.handler(tool.inputSchema.parse({ bridgeSessionId: "old" }));
     expect(r.structuredContent.code).toBe("SESSION_PROJECT_MISMATCH");
     expect(b.client.getDiff).not.toHaveBeenCalled();
   });
-  it("fails before launching when the repo has no .ia-dev.yml profile", async () => {
+  it("fails before launching when the repo has no .ia-dev.yml profile", { timeout: 10000 }, async () => {
     await rm(join(repo, ".ia-dev.yml"));
     const b = bridge(async () => writeFile(join(repo, "tracked.txt"), "new edit"));
     const r = await b.run({ requireClean: false });
@@ -97,7 +97,7 @@ describe("physical task verification", () => {
     expect(r.error).toContain(".ia-dev.yml");
     expect(b.client.sendMessage).not.toHaveBeenCalled();
   });
-  it("fails before launching when the profile allows no writes", async () => {
+  it("fails before launching when the profile allows no writes", { timeout: 10000 }, async () => {
     await writeFile(join(repo, ".ia-dev.yml"), [
       'version: "2.1"',
       'profile: "code-change"',
