@@ -101,9 +101,12 @@ Recovery outcomes:
 
 - `version` must be `"2.1"`; `profile` is one of `code-change|bugfix|refactor|test|docs|config`; `goal` needs at least 10 characters
 - `models.author` and `models.reviewer` are required, must be different, and must belong to the engine-owned free-model registry.
-- Before creating a task session, the bridge reads the managed server's `/provider` inventory. Both models must be active on a connected provider and advertise exactly zero input, output, cache-read and cache-write tariffs. Missing or malformed metadata blocks execution.
-- Explicit `providerID`/`modelID` overrides must be supplied together and pass the same checks. The reviewer model is excluded from author fallback. With only two registered models, quota exhaustion stops the task rather than reusing the reviewer.
-- Advertised zero tariffs are a preflight check, not a claim of observed execution cost. Model usage/cost telemetry and independent review remain separate requirements.
+- Every tool that can put a model on the wire enforces this: `ia_dev_run_task`, `opencode_launch_task` and `opencode_send_message`. Explicit `providerID`/`modelID` overrides must be supplied together and must name a registry model. When no override is given, the profile author is used and a profile must exist.
+- Before any prompt is submitted, the bridge reads the managed server's `/provider` inventory and verifies the model is on a connected provider with an advertised cost block whose input, output and any cache/`context_over_200k` rates are exactly zero. A missing cost block, a missing provider, an ambiguous provider record, a model id that does not match its key, or a deprecated model all block execution. Unparseable inventory blocks execution.
+- Rates the provider does not advertise (`cache_read`, `cache_write`) are treated as not charged. This is a policy assumption, not proof: if you want them required, tighten `ZeroRateSchema`.
+- **There is no author fallback.** The registry holds two models and the reviewer is the only alternative, so a quota rejection (HTTP 429/402) stops the task and reports that the prompt was not resubmitted. Re-adding a fallback requires registering a third free model that is discovered and verified against the live inventory.
+- Free-only is verified twice: the advertised tariff before submission, and after completion from the `providerID`/`modelID`/`cost` that OpenCode records on each assistant message. A turn on a non-registered model, or a reported cost above zero, makes the task fail even if it ended idle/completed.
+- These are the guards the bridge itself applies. They are not an agent sandbox: see the limits below.
 - `paths` uses the 4-list permission model: `context_paths` (readable), `write_paths` (modifiable, empty = no writes allowed), `protected_paths` (never written), `sensitive_paths` (never read)
 - `limits` and `commands` are optional and fall back to defaults
 - The tool fails before sending any prompt when the profile is missing or `write_paths` is empty
@@ -290,4 +293,22 @@ A deadline aborts the HTTP connection only: it does not cancel an OpenCode sessi
 
 ## Profile path precedence
 
-`sensitive_paths` deny both reads and writes, even when `context_paths` or `write_paths` also match. `protected_paths` deny writes. Relative paths are normalized for matching (separators and `.` segments); absolute paths, parent traversal and NUL bytes are rejected before normalization. The filesystem access validators and `opencode_read_file` also reject symlink components, including internal and dangling links, before delegating access. Proposed files under ordinary directories remain allowed. The checks do not read link targets. They are preflight checks, not a filesystem sandbox: concurrent path replacement can still create a race, and direct agent access requires separate enforcement.
+`sensitive_paths` deny both reads and writes, even when `context_paths` or `write_paths` also match. `protected_paths` deny writes. Relative paths are normalized for matching (separators and `.` segments); absolute paths, parent traversal and NUL bytes are rejected before normalization. The filesystem access validators and `opencode_read_file` also reject symlink components, including internal and dangling links, before delegating access. For writes, a path that does not exist yet is a legitimate creation target; for reads it is denied, because a missing file is not readable and a directory is not a readable file. The checks do not read link targets. They are preflight checks, not a filesystem sandbox: concurrent path replacement can still create a race, and direct agent access requires separate enforcement.
+
+## What these guards do and do not cover
+
+The bridge validates the calls it receives. It does not contain the agent.
+
+Covered by the bridge:
+- Which repo, file and model a tool call may touch, resolved against `.ia-dev.yml`.
+- Which models may reach the wire, verified before submission and again from observed usage afterwards.
+- Which paths a finished task actually dirtied, checked against the write policy.
+
+Not covered by the bridge:
+- **Filesystem TOCTOU.** `isSafeRepoFilePath` lstats each component in the bridge process; the OpenCode server performs the actual read in a different process. A component swapped for a symlink between the check and the use is not caught. Use OS-level isolation for that.
+- **Direct agent access.** Anything the OpenCode agent does on its own, with its own tools and permissions, is outside every check here. `write_paths` is enforced by refusing to *report success* for an out-of-policy change; it is not a write fence. Enforcing writes requires an agent-side permission layer (`agent.permission.edit`, OS sandbox or container).
+- **Preflight vs execution.** The `/provider` inventory is a point-in-time advertisement. The authoritative signal is the post-hoc check over assistant message metadata; if that fetch fails, the task fails rather than assuming freeness.
+- **Paths already dirty before the run** are not re-attributed to the task, so a path that was already modified and then modified again would not be re-checked against `write_paths` by the post-hoc step.
+- **Cost attribution outside the session.** Only turns recorded in the inspected session are checked.
+
+Quota handling: only HTTP 429 and 402 are treated as a definitive quota rejection, using the structured status rather than the response body, which is provider-controlled text. Deadlines, 5xx and transport errors are reported as an unknown submission outcome; the prompt is never resubmitted automatically because acceptance cannot be proven either way.

@@ -1,5 +1,5 @@
 import { describe, expect, it, vi, afterEach } from "vitest";
-import { OpencodeClient, OpencodeRequestTimeoutError } from "../src/opencode/client.js";
+import { OpencodeClient, OpencodeHttpError, OpencodeRequestTimeoutError } from "../src/opencode/client.js";
 
 describe("OpencodeClient", () => {
   it("sends basic auth and JSON payloads", async () => {
@@ -96,5 +96,26 @@ describe("bounded OpenCode requests", () => {
     expect(await client.health()).toEqual({ healthy: true }); expect(vi.getTimerCount()).toBe(0);
     const failing = new OpencodeClient({ baseUrl: "http://localhost", fetchImpl: async () => { throw new Error("offline"); } });
     await expect(failing.health()).rejects.toThrow("offline"); expect(vi.getTimerCount()).toBe(0);
+  });
+});
+
+describe("structured HTTP failures", () => {
+  it("carries the status code and body on a non-2xx response", async () => {
+    const fetchImpl: typeof fetch = async () => new Response("slow down", { status: 429, statusText: "Too Many Requests" });
+    const client = new OpencodeClient({ baseUrl: "http://localhost", fetchImpl });
+    const error = await client.health().catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(OpencodeHttpError);
+    const http = error as OpencodeHttpError;
+    expect(http.status).toBe(429);
+    expect(http.statusText).toBe("Too Many Requests");
+    expect(http.body).toBe("slow down");
+    expect(http.code).toBe("OPENCODE_HTTP_ERROR");
+  });
+
+  it("does not treat a body-only quota string as a quota signal", async () => {
+    const fetchImpl: typeof fetch = async () => new Response("quota exceeded", { status: 500, statusText: "Internal Server Error" });
+    const client = new OpencodeClient({ baseUrl: "http://localhost", fetchImpl });
+    const error = (await client.health().catch((e: unknown) => e)) as OpencodeHttpError;
+    expect(error.status).toBe(500);
   });
 });
