@@ -47,7 +47,13 @@ export async function validateRepoPath(repoPath: string, allowedRoots: string[])
   );
   const allowed = realRoots.filter((root): root is string => Boolean(root));
   if (!allowed.some((root) => isInside(root, resolvedRepo))) {
-    throw new Error(`Repo path is outside allowed roots: ${resolvedRepo}`);
+    const configured = allowedRoots.length > 0 ? allowedRoots.join(", ") : "(none configured)";
+    throw new Error(
+      `Repo path is outside allowed roots: ${resolvedRepo}. ` +
+      `Configured allowed roots: ${configured}. ` +
+      `Add it with --allowed-roots or the OPENCODE_BRIDGE_ALLOWED_ROOTS environment variable ` +
+      `(colon-separated).`
+    );
   }
   return resolvedRepo;
 }

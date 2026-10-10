@@ -21,6 +21,34 @@ describe("path security", () => {
     await expect(validateRepoPath(outside, [root])).rejects.toThrow(/outside allowed roots/);
   });
 
+  async function rejectionMessage(fn: () => Promise<unknown>): Promise<string> {
+    try {
+      await fn();
+    } catch (error) {
+      return (error as Error).message;
+    }
+    throw new Error("expected the call to be rejected, but it resolved");
+  }
+
+  it("explains which roots are configured and how to add one", async () => {
+    const root = await mkdtemp(join(tmpdir(), "bridge-root-"));
+    const outside = await mkdtemp(join(tmpdir(), "bridge-outside-"));
+    const message = await rejectionMessage(() => validateRepoPath(outside, [root]));
+    // The denial states the denied path, the configured roots and the
+    // remediation, so the failure is actionable instead of a bare rejection.
+    expect(message).toMatch(/outside allowed roots/);
+    expect(message).toContain(root);
+    expect(message).toContain("OPENCODE_BRIDGE_ALLOWED_ROOTS");
+    expect(message).toContain("--allowed-roots");
+  });
+
+  it("reports an empty root list instead of failing opaquely", async () => {
+    const outside = await mkdtemp(join(tmpdir(), "bridge-outside-"));
+    const message = await rejectionMessage(() => validateRepoPath(outside, []));
+    expect(message).toMatch(/outside allowed roots/);
+    expect(message).toContain("none configured");
+  });
+
   it("finds git projects", async () => {
     const root = await mkdtemp(join(tmpdir(), "bridge-root-"));
     await mkdir(join(root, "a", ".git"), { recursive: true });
