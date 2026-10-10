@@ -7,6 +7,7 @@ import {
   type IADevProfile,
   type PathsConfig
 } from "../config/schema.js";
+import { validateFreeModel } from "../models/registry.js";
 
 const CONFIG_NAME = ".ia-dev.yml";
 
@@ -30,7 +31,10 @@ export async function loadProfile(repoPath: string): Promise<IADevProfile> {
     throw new Error(`Missing .ia-dev.yml in ${repoPath}. Create it from .ia-dev.yml.example`);
   }
   const parsed = yaml.parse(raw);
-  return IADevProfileSchema.parse(parsed);
+  const profile = IADevProfileSchema.parse(parsed);
+  validateFreeModel(profile.models.author);
+  validateFreeModel(profile.models.reviewer);
+  return profile;
 }
 
 export function validateReadAccess(profile: IADevProfile, filePath: string): boolean {

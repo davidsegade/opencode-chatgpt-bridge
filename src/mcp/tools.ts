@@ -5,7 +5,8 @@ import { z } from "zod/v4";
 import type { BridgeConfig, JsonValue, OpencodeStatus } from "../types.js";
 import { isTerminalOpencodeStatus, isSuccessfulTerminalOpencodeStatus } from "../types.js";
 import { listProjects, validateRepoPath, validateProfileExists } from "../security/paths.js";
-import { validateReadAccess } from "../security/profile.js";
+import { validateReadAccess, loadProfile } from "../security/profile.js";
+import { validateFreeModel, detectQuotaError, resolveFreeModelFallback, type FreeModel, type QuotaError } from "../models/registry.js";
 import { OpencodeProcessManager } from "../opencode/process.js";
 import { StateStore } from "../state/store.js";
 import { safeTool } from "./results.js";
@@ -620,6 +621,27 @@ export function createBridgeMcpServer(ctx: RegisterContext): McpServer {
         }
 
         const profile = await validateProfileExists(validated);
+
+        const primaryModel: FreeModel = input.providerID && input.modelID
+          ? { provider: input.providerID, modelId: input.modelID, alias: input.modelID }
+          : validateFreeModel(profile.models.author);
+
+        async function sendMessageWithFallback(model: FreeModel, tried: Set<string> = new Set()): Promise<void> {
+          tried.add(model.modelId);
+          try {
+await sendMessageWithFallback(primaryModel);
+          } catch (error) {
+            const quotaErr = detectQuotaError(error);
+            if (quotaErr && quotaErr.code !== "MODEL_NOT_FOUND") {
+              const fallback = resolveFreeModelFallback(model, tried);
+              if (fallback) {
+                await sendMessageWithFallback(fallback, tried);
+                return;
+              }
+            }
+            throw error;
+          }
+        }
 
         if (profile.paths.write_paths.length === 0) {
           throw new Error("Profile has empty write_paths. Define write_paths in .ia-dev.yml to allow modifications.");
