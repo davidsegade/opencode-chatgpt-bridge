@@ -22,9 +22,3 @@ export async function safeTool<T extends Record<string, unknown>>(fn: () => Prom
     return errorResult(message, code);
   }
 }
-
-export function extractTextParts(messages: unknown[], maxChars = 6000): string {
-  const raw = JSON.stringify(messages, null, 2);
-  if (raw.length <= maxChars) return raw;
-  return `${raw.slice(0, maxChars)}\n... truncated ${raw.length - maxChars} chars`;
-}
