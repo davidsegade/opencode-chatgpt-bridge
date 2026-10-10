@@ -17,8 +17,20 @@ export async function checkOpencodeCli(config: BridgeConfig): Promise<OpencodeCl
       execFileAsync(config.opencodeBin, ["--version"], { timeout: 5000 }),
       execFileAsync("which", [config.opencodeBin], { timeout: 5000 })
     ]);
-    const version = versionResult.status === "fulfilled" ? versionResult.value.stdout.trim() || versionResult.value.stderr.trim() : undefined;
     const path = pathResult.status === "fulfilled" ? pathResult.value.stdout.trim() : undefined;
+    // `--version` failing (ENOENT, EACCES, non-zero exit) is the authoritative
+    // signal. Promise.allSettled never rejects, so this must be inspected here:
+    // without it a missing binary reads as "installed with an unknown version"
+    // and the setup guide points the user at the wrong problem.
+    if (versionResult.status === "rejected") {
+      const reason = versionResult.reason;
+      return {
+        installed: false,
+        path,
+        error: reason instanceof Error ? reason.message : String(reason)
+      };
+    }
+    const version = versionResult.value.stdout.trim() || versionResult.value.stderr.trim();
     return { installed: true, version, path };
   } catch (error) {
     return {
