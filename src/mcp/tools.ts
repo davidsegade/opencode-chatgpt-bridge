@@ -5,6 +5,7 @@ import { z } from "zod/v4";
 import type { BridgeConfig, JsonValue, OpencodeStatus } from "../types.js";
 import { isTerminalOpencodeStatus, isSuccessfulTerminalOpencodeStatus } from "../types.js";
 import { listProjects, validateRepoPath, validateProfileExists } from "../security/paths.js";
+import { validateReadAccess } from "../security/profile.js";
 import { OpencodeProcessManager } from "../opencode/process.js";
 import { StateStore } from "../state/store.js";
 import { safeTool } from "./results.js";
@@ -294,6 +295,10 @@ export function createBridgeMcpServer(ctx: RegisterContext): McpServer {
     async ({ bridgeSessionId, path }) =>
       safeTool(async () => {
         const { bridge, managed, client } = await getSessionClientForRepoLevel(ctx, bridgeSessionId);
+        const profile = await validateProfileExists(bridge.repoPath);
+        if (!validateReadAccess(profile, path)) {
+          throw new Error(`Read denied by .ia-dev.yml: "${path}" is outside context_paths or matches sensitive_paths.`);
+        }
         return { file: json(await client.readFile(path)), managedServer: managed.baseUrl };
       })
   );

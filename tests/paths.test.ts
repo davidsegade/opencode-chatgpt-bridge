@@ -92,6 +92,61 @@ models:
     expect(result.deniedPaths).not.toContain("src/routes/createRoute.ts");
   });
 
+  it("denies absolute paths even when they match context patterns", async () => {
+    const result = await validateContextAccess(repo, [
+      "/etc/passwd",
+      "C:\\Windows\\System32\\config\\SAM",
+      "src/routes/createRoute.ts"
+    ]);
+    expect(result.allowed).toBe(false);
+    expect(result.deniedPaths).toContain("/etc/passwd");
+    expect(result.deniedPaths).toContain("C:\\Windows\\System32\\config\\SAM");
+    expect(result.deniedPaths).not.toContain("src/routes/createRoute.ts");
+  });
+
+  it("denies parent-directory traversal in read and write", async () => {
+    const readResult = await validateContextAccess(repo, [
+      "../outside/secret.ts",
+      "src/../../etc/passwd"
+    ]);
+    expect(readResult.allowed).toBe(false);
+    expect(readResult.deniedPaths).toContain("../outside/secret.ts");
+    expect(readResult.deniedPaths).toContain("src/../../etc/passwd");
+
+    const writeResult = await validateWriteAccess(repo, [
+      "../outside/file.ts",
+      "src/../../outside/file.ts"
+    ]);
+    expect(writeResult.allowed).toBe(false);
+    expect(writeResult.deniedPaths).toContain("../outside/file.ts");
+    expect(writeResult.deniedPaths).toContain("src/../../outside/file.ts");
+  });
+
+  it("denies write to absolute paths even when write_paths is broad", async () => {
+    await writeFile(join(repo, ".ia-dev.yml"), `
+version: "2.1"
+profile: "code-change"
+goal: "Test broad write paths with absolute input"
+paths:
+  context_paths: ["**/*"]
+  write_paths: ["**/*"]
+  protected_paths: [".github/**"]
+  sensitive_paths: ["**/.env*"]
+models:
+  author: "mimo-v2.6-flash-free"
+  reviewer: "space-bunny-free"
+`);
+    const result = await validateWriteAccess(repo, [
+      "/etc/hosts",
+      "../outside.ts",
+      "src/routes/createRoute.ts"
+    ]);
+    expect(result.allowed).toBe(false);
+    expect(result.deniedPaths).toContain("/etc/hosts");
+    expect(result.deniedPaths).toContain("../outside.ts");
+    expect(result.deniedPaths).not.toContain("src/routes/createRoute.ts");
+  });
+
   it("allows write in write_paths", async () => {
     const result = await validateWriteAccess(repo, [
       "src/routes/createRoute.ts",

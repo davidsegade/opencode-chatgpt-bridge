@@ -1,5 +1,5 @@
 import { readFile } from "node:fs/promises";
-import { resolve } from "node:path";
+import { posix, resolve, win32 } from "node:path";
 import * as yaml from "yaml";
 import { minimatch } from "minimatch";
 import {
@@ -9,6 +9,16 @@ import {
 } from "../config/schema.js";
 
 const CONFIG_NAME = ".ia-dev.yml";
+
+function isRepoRelative(filePath: string): boolean {
+  if (typeof filePath !== "string" || filePath.length === 0) return false;
+  if (posix.isAbsolute(filePath) || win32.isAbsolute(filePath)) return false;
+  return !filePath.replaceAll("\\", "/").split("/").includes("..");
+}
+
+function normalizeRelPath(filePath: string): string {
+  return filePath.replaceAll("\\", "/").replace(/^\.\//, "");
+}
 
 export async function loadProfile(repoPath: string): Promise<IADevProfile> {
   if (typeof repoPath !== "string") {
@@ -24,16 +34,20 @@ export async function loadProfile(repoPath: string): Promise<IADevProfile> {
 }
 
 export function validateReadAccess(profile: IADevProfile, filePath: string): boolean {
+  if (!isRepoRelative(filePath)) return false;
+  const normalized = normalizeRelPath(filePath);
   const { context_paths, sensitive_paths } = profile.paths;
-  if (matchAny(filePath, sensitive_paths)) return false;
-  return matchAny(filePath, context_paths);
+  if (matchAny(normalized, sensitive_paths)) return false;
+  return matchAny(normalized, context_paths);
 }
 
 export function validateWriteAccess(profile: IADevProfile, filePath: string): boolean {
+  if (!isRepoRelative(filePath)) return false;
+  const normalized = normalizeRelPath(filePath);
   const { write_paths, protected_paths } = profile.paths;
-  if (matchAny(filePath, protected_paths)) return false;
+  if (matchAny(normalized, protected_paths)) return false;
   if (write_paths.length === 0) return false;
-  return matchAny(filePath, write_paths);
+  return matchAny(normalized, write_paths);
 }
 
 export function validateContextPaths(profile: IADevProfile, filePaths: string[]): string[] {
@@ -62,42 +76,6 @@ export function getProtectedPaths(profile: IADevProfile): string[] {
 
 export function getSensitivePaths(profile: IADevProfile): string[] {
   return profile.paths.sensitive_paths;
-}
-
-export function createDefaultProfile(): IADevProfile {
-  return {
-    version: "2.1" as const,
-    profile: "code-change",
-    goal: "Describe the change you want to make",
-    paths: {
-      context_paths: ["**/*"],
-      write_paths: [],
-      protected_paths: [
-        ".github/**",
-        ".ia-dev.yml",
-        "package-lock.json",
-        "pnpm-lock.yaml",
-        "**/*.lock"
-      ],
-      sensitive_paths: [
-        "**/.env*",
-        "**/*.pem",
-        "**/*.key",
-        "**/secrets/**",
-        "**/credentials/**"
-      ]
-    },
-    models: {
-      author: "mimo-v2.6-flash-free",
-      reviewer: "space-bunny-free"
-    },
-    limits: {
-      max_context_tokens: 4000,
-      max_attempts: 3,
-      timeout_ms: 300000
-    },
-    commands: {}
-  };
 }
 
 export type { IADevProfile, PathsConfig } from "../config/schema.js";

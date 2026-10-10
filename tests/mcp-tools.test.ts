@@ -511,6 +511,54 @@ describe("MCP Tools - session server recovery", () => {
     expect(mockClient.getSession).not.toHaveBeenCalled();
   });
 
+  it("denies opencode_read_file for sensitive_paths", async () => {
+    const { config, processManager, state, mockClient } = createMockContextWithMismatch();
+    const server = createBridgeMcpServer({ config, processManager: processManager as any, state: state as any });
+
+    const tool = (server as any)._registeredTools?.opencode_read_file;
+    const result = await tool.handler({
+      bridgeSessionId: "bridge_test123",
+      path: ".env.production"
+    });
+
+    const content = result.structuredContent as any;
+    expect(content.ok).toBe(false);
+    expect(content.error).toContain("Read denied by .ia-dev.yml");
+    expect(mockClient.readFile).not.toHaveBeenCalled();
+  });
+
+  it("denies opencode_read_file for absolute paths outside the repo", async () => {
+    const { config, processManager, state, mockClient } = createMockContextWithMismatch();
+    const server = createBridgeMcpServer({ config, processManager: processManager as any, state: state as any });
+
+    const tool = (server as any)._registeredTools?.opencode_read_file;
+    const result = await tool.handler({
+      bridgeSessionId: "bridge_test123",
+      path: "/etc/passwd"
+    });
+
+    const content = result.structuredContent as any;
+    expect(content.ok).toBe(false);
+    expect(content.error).toContain("Read denied by .ia-dev.yml");
+    expect(mockClient.readFile).not.toHaveBeenCalled();
+  });
+
+  it("denies opencode_read_file for parent-directory traversal", async () => {
+    const { config, processManager, state, mockClient } = createMockContextWithMismatch();
+    const server = createBridgeMcpServer({ config, processManager: processManager as any, state: state as any });
+
+    const tool = (server as any)._registeredTools?.opencode_read_file;
+    const result = await tool.handler({
+      bridgeSessionId: "bridge_test123",
+      path: "../outside/secret.ts"
+    });
+
+    const content = result.structuredContent as any;
+    expect(content.ok).toBe(false);
+    expect(content.error).toContain("Read denied by .ia-dev.yml");
+    expect(mockClient.readFile).not.toHaveBeenCalled();
+  });
+
   it("allows repo-level operations (opencode_find_files) even with baseUrl mismatch", async () => {
     const { config, processManager, state, mockClient } = createMockContextWithMismatch();
     const server = createBridgeMcpServer({ config, processManager: processManager as any, state: state as any });
