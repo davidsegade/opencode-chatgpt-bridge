@@ -28,10 +28,44 @@ export class OpencodeRequestTimeoutError extends Error {
   }
 }
 
+/**
+ * Stable, structured failure domain for a non-2xx response.
+ *
+ * Tool consumers receive `code` through safeTool, so the same numeric status
+ * must not collapse into one generic label: an operator has to be able to tell
+ * "your tunnel is down" from "the provider refused the model" without parsing
+ * provider-controlled prose.
+ */
+export function httpErrorCode(status: number): string {
+  if (status === 402) return "OPENCODE_QUOTA_EXCEEDED";
+  if (status === 429) return "OPENCODE_RATE_LIMITED";
+  if (status === 401 || status === 403) return "OPENCODE_AUTH_ERROR";
+  if (status >= 500) return "OPENCODE_SERVER_ERROR";
+  return "OPENCODE_HTTP_ERROR";
+}
+
+/**
+ * The managed server could not be reached at all: DNS, connection refused, TLS,
+ * or a dead tunnel. Distinct from a server that answered with an error status,
+ * because the remedy is entirely different (start the server / check the tunnel)
+ * and no prompt outcome can be inferred from it.
+ */
+export class OpencodeUnreachableError extends Error {
+  readonly code = "OPENCODE_UNREACHABLE";
+  constructor(baseUrl: string, cause: unknown) {
+    const message = cause instanceof Error ? cause.message : String(cause);
+    super(
+      `Could not reach the opencode server at ${baseUrl}: ${message}. ` +
+      `Is the managed server running (and, for a public URL, the tunnel up)?`
+    );
+    this.name = "OpencodeUnreachableError";
+  }
+}
+
 /** A non-2xx response. Carries the structured status so callers never have to
  * guess from the response body, which is provider-controlled free text. */
 export class OpencodeHttpError extends Error {
-  readonly code = "OPENCODE_HTTP_ERROR";
+  readonly code: string;
   constructor(
     readonly status: number,
     readonly statusText: string,
@@ -40,6 +74,7 @@ export class OpencodeHttpError extends Error {
   ) {
     super(`opencode ${status} ${statusText} on ${path}${body ? ` - ${body}` : ""}`);
     this.name = "OpencodeHttpError";
+    this.code = httpErrorCode(status);
   }
 }
 
@@ -89,11 +124,21 @@ export class OpencodeClient {
       }, timeoutMs);
     });
     const operation = async (): Promise<T> => {
-      const res = await this.fetchImpl(`${this.baseUrl}${path}`, {
-        ...init,
-        signal: controller.signal,
-        headers: this.headers(init.headers)
-      });
+      let res: Response;
+      try {
+        res = await this.fetchImpl(`${this.baseUrl}${path}`, {
+          ...init,
+          signal: controller.signal,
+          headers: this.headers(init.headers)
+        });
+      } catch (error) {
+        // The deadline already classified this rejection; do not relabel it as
+        // unreachable when it is the abort it asked for.
+        if (error instanceof OpencodeRequestTimeoutError) throw error;
+        // Never answered on the wire: connection refused, DNS, TLS or a dead
+        // tunnel. Say so instead of surfacing a bare fetch/ECONNREFUSED string.
+        throw new OpencodeUnreachableError(this.baseUrl, error);
+      }
       if (!res.ok) {
         const body = await res.text().catch(() => "");
         throw new OpencodeHttpError(res.status, res.statusText, path, body);

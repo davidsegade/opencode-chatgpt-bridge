@@ -1,5 +1,5 @@
 import { describe, expect, it, vi, afterEach } from "vitest";
-import { OpencodeClient, OpencodeHttpError, OpencodeRequestTimeoutError } from "../src/opencode/client.js";
+import { OpencodeClient, OpencodeHttpError, OpencodeRequestTimeoutError, OpencodeUnreachableError, httpErrorCode } from "../src/opencode/client.js";
 
 describe("OpencodeClient", () => {
   it("sends basic auth and JSON payloads", async () => {
@@ -49,6 +49,28 @@ describe("OpencodeClient", () => {
   });
 });
 
+
+describe("httpErrorCode", () => {
+  it.each([
+    [200, "OPENCODE_HTTP_ERROR"],
+    [400, "OPENCODE_HTTP_ERROR"],
+    [401, "OPENCODE_AUTH_ERROR"],
+    [403, "OPENCODE_AUTH_ERROR"],
+    [402, "OPENCODE_QUOTA_EXCEEDED"],
+    [429, "OPENCODE_RATE_LIMITED"],
+    [500, "OPENCODE_SERVER_ERROR"],
+    [503, "OPENCODE_SERVER_ERROR"],
+    [599, "OPENCODE_SERVER_ERROR"]
+  ])("maps %i to %s", (status, code) => {
+    expect(httpErrorCode(status)).toBe(code);
+  });
+
+  it("keeps quota distinguishable for every future 4xx", () => {
+    // New client statuses default to the generic domain rather than silently
+    // claiming a quota or server failure.
+    expect(httpErrorCode(418)).toBe("OPENCODE_HTTP_ERROR");
+  });
+});
 
 describe("bounded OpenCode requests", () => {
   afterEach(() => vi.useRealTimers());
@@ -109,7 +131,45 @@ describe("structured HTTP failures", () => {
     expect(http.status).toBe(429);
     expect(http.statusText).toBe("Too Many Requests");
     expect(http.body).toBe("slow down");
-    expect(http.code).toBe("OPENCODE_HTTP_ERROR");
+  });
+
+  it.each([
+    [402, "OPENCODE_QUOTA_EXCEEDED"],
+    [429, "OPENCODE_RATE_LIMITED"],
+    [401, "OPENCODE_AUTH_ERROR"],
+    [403, "OPENCODE_AUTH_ERROR"],
+    [500, "OPENCODE_SERVER_ERROR"],
+    [503, "OPENCODE_SERVER_ERROR"],
+    [400, "OPENCODE_HTTP_ERROR"]
+  ])("maps HTTP %i to failure domain %s", async (status, code) => {
+    const fetchImpl: typeof fetch = async () => new Response("", { status, statusText: "err" });
+    const client = new OpencodeClient({ baseUrl: "http://localhost", fetchImpl });
+    const error = (await client.health().catch((e: unknown) => e)) as OpencodeHttpError;
+    expect(error.code).toBe(code);
+  });
+
+  it("reports an unreachable server as its own domain, not a bare fetch error", async () => {
+    const fetchImpl: typeof fetch = async () => {
+      throw new TypeError("fetch failed", { cause: new Error("connect ECONNREFUSED 127.0.0.1:4096") });
+    };
+    const client = new OpencodeClient({ baseUrl: "http://127.0.0.1:4096", fetchImpl });
+    const error = (await client.health().catch((e: unknown) => e)) as OpencodeUnreachableError;
+    expect(error).toBeInstanceOf(OpencodeUnreachableError);
+    expect(error.code).toBe("OPENCODE_UNREACHABLE");
+    // The domain, the target and a concrete remedy are all in one message.
+    expect(error.message).toContain("http://127.0.0.1:4096");
+    expect(error.message).toMatch(/server running|tunnel/i);
+    expect(error.status).toBeUndefined();
+  });
+
+  it("does not relabel an abort caused by the deadline as unreachable", async () => {
+    const fetchImpl: typeof fetch = async (_url, init = {}) =>
+      new Promise<Response>((_resolve, reject) => {
+        init.signal?.addEventListener("abort", () => reject(init.signal?.reason ?? new Error("aborted")));
+      });
+    const client = new OpencodeClient({ baseUrl: "http://localhost", fetchImpl, requestTimeoutMs: 20 });
+    const error = (await client.health().catch((e: unknown) => e)) as Error;
+    expect(error).toBeInstanceOf(OpencodeRequestTimeoutError);
   });
 
   it("does not treat a body-only quota string as a quota signal", async () => {
