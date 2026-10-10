@@ -50,6 +50,28 @@ describe("physical task verification", () => {
     expect(b.client.createSession).not.toHaveBeenCalled();
     expect(b.client.sendMessage).not.toHaveBeenCalled();
   });
+  it("rejects an unparseable inventory before creating a task session", { timeout: 10000 }, async () => {
+    const b = bridge(); b.client.listProviders.mockResolvedValue({ all: [], connected: [] });
+    expect((await b.run()).ok).toBe(false);
+    expect(b.client.createSession).not.toHaveBeenCalled();
+    expect(b.client.sendMessage).not.toHaveBeenCalled();
+  });
+  it("rejects ambiguous provider records before creating a task session", { timeout: 10000 }, async () => {
+    const b = bridge(); const inventory = await b.client.listProviders();
+    inventory.all.push(inventory.all[0]!);
+    b.client.listProviders.mockResolvedValue(inventory);
+    expect((await b.run()).error).toContain("verified zero-cost");
+    expect(b.client.createSession).not.toHaveBeenCalled();
+    expect(b.client.sendMessage).not.toHaveBeenCalled();
+  });
+  it("rejects a model record whose id does not match its key", { timeout: 10000 }, async () => {
+    const b = bridge(); const inventory = await b.client.listProviders();
+    inventory.all[0]!.models["mimo-v2.6-flash-free"]!.id = "something-else";
+    b.client.listProviders.mockResolvedValue(inventory);
+    expect((await b.run()).error).toContain("verified zero-cost");
+    expect(b.client.createSession).not.toHaveBeenCalled();
+    expect(b.client.sendMessage).not.toHaveBeenCalled();
+  });
 
   it("sends the profile author model explicitly once", { timeout: 10000 }, async () => {
     const b = bridge(async () => writeFile(join(repo, "tracked.txt"), "edit"));

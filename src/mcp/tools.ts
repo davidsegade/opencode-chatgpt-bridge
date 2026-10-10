@@ -3,6 +3,7 @@ import { resolveSessionStatus } from "../opencode/status.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod/v4";
 import type { BridgeConfig, JsonValue, OpencodeStatus } from "../types.js";
+import type { IADevProfile } from "../config/schema.js";
 import type { GitStatus } from "../git/repository.js";
 import { isTerminalOpencodeStatus, isSuccessfulTerminalOpencodeStatus } from "../types.js";
 import { listProjects, validateRepoPath, validateProfileExists, isSafeRepoFilePath } from "../security/paths.js";
@@ -72,20 +73,33 @@ function taskOwnedPaths(
  * provider inventory before any prompt is submitted. When free-only cannot be
  * established the prompt is not sent.
  */
+function resolveModelIdentifier(
+  profile: IADevProfile | null,
+  override: { providerID?: string; modelID?: string }
+): FreeModel {
+  if (Boolean(override.providerID) !== Boolean(override.modelID)) {
+    throw new Error("providerID and modelID must be supplied together.");
+  }
+  return validateFreeModel(
+    override.providerID && override.modelID
+      ? `${override.providerID}/${override.modelID}`
+      : profile!.models.author
+  );
+}
+
+async function assertLiveFreeModels(client: OpencodeClient, models: FreeModel[]): Promise<void> {
+  validateLiveFreeModels(await client.listProviders(), models);
+}
+
 async function resolveFreeOnlyModel(
   client: OpencodeClient,
   repoPath: string,
   override: { providerID?: string; modelID?: string }
 ): Promise<FreeModel> {
-  if (Boolean(override.providerID) !== Boolean(override.modelID)) {
-    throw new Error("providerID and modelID must be supplied together.");
-  }
   const profile = override.providerID ? null : await validateProfileExists(repoPath);
-  const model = validateFreeModel(
-    override.providerID && override.modelID ? `${override.providerID}/${override.modelID}` : profile!.models.author
-  );
+  const model = resolveModelIdentifier(profile, override);
   const required = profile ? [model, validateFreeModel(profile.models.reviewer)] : [model];
-  validateLiveFreeModels(await client.listProviders(), required);
+  await assertLiveFreeModels(client, required);
   return model;
 }
 
@@ -696,11 +710,10 @@ export function createBridgeMcpServer(ctx: RegisterContext): McpServer {
 
         const profile = await validateProfileExists(validated);
 
-        if (Boolean(input.providerID) !== Boolean(input.modelID)) {
-          throw new Error("providerID and modelID must be supplied together.");
-        }
-        const primaryModel = validateFreeModel(input.providerID && input.modelID
-          ? `${input.providerID}/${input.modelID}` : profile.models.author);
+        const primaryModel = resolveModelIdentifier(profile, {
+          providerID: input.providerID,
+          modelID: input.modelID
+        });
         const reviewerModel = validateFreeModel(profile.models.reviewer);
         if (primaryModel.provider === reviewerModel.provider && primaryModel.modelId === reviewerModel.modelId) {
           throw new Error("Author and reviewer must use different models.");
@@ -725,7 +738,7 @@ export function createBridgeMcpServer(ctx: RegisterContext): McpServer {
 
         const managed = await ctx.processManager.ensure(validated);
         const client = ctx.processManager.clientFor(managed);
-        validateLiveFreeModels(await client.listProviders(), [primaryModel, reviewerModel]);
+        await assertLiveFreeModels(client, [primaryModel, reviewerModel]);
 
         const session = await client.createSession(input.title);
         const opencodeSessionId = String(session.id ?? session.ID ?? session.sessionID ?? "");
