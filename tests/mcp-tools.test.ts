@@ -75,7 +75,7 @@ function createMockContext(overrides: Partial<{
     getDiff: vi.fn().mockResolvedValue([{ path: "test.ts", diff: "+ console.log('hello')" }]),
     listAgents: vi.fn().mockResolvedValue([]),
     listCommands: vi.fn().mockResolvedValue([]),
-    listProviders: vi.fn().mockResolvedValue({ connected: ["opencode"], all: [{ id: "opencode", models: Object.fromEntries(["mimo-v2.6-flash-free", "space-bunny-free"].map(id => [id, { id, status: "active", cost: { input: 0, output: 0, cache: { read: 0, write: 0 } } }])) }] }),
+    listProviders: vi.fn().mockResolvedValue({ connected: ["opencode"], all: [{ id: "opencode", name: "opencode", env: [], models: Object.fromEntries(["mimo-v2.6-flash-free", "space-bunny-free"].map(id => [id, { id, name: id, release_date: "2026-01-01", attachment: false, reasoning: false, temperature: true, tool_call: true, cost: { input: 0, output: 0, cache_read: 0, cache_write: 0 }, limit: { context: 200000, output: 8192 }, options: {} }])) }], default: {} }),
     getProviderAuthMethods: vi.fn().mockResolvedValue({}),
     getConfigProviders: vi.fn().mockResolvedValue({}),
     abortSession: vi.fn().mockResolvedValue(true),
