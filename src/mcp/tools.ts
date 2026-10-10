@@ -403,7 +403,7 @@ export function createBridgeMcpServer(ctx: RegisterContext): McpServer {
     },
     async ({ bridgeSessionId, query, limit, directory }) =>
       safeTool(async () => {
-        const { bridge, managed, client } = await getSessionClientForRepoLevel(ctx, bridgeSessionId);
+        const { managed, client } = await getSessionClientForRepoLevel(ctx, bridgeSessionId);
         return { files: json(await client.findFiles(query, limit, directory)), managedServer: managed.baseUrl };
       })
   );
@@ -418,7 +418,7 @@ export function createBridgeMcpServer(ctx: RegisterContext): McpServer {
     },
     async ({ bridgeSessionId }) =>
       safeTool(async () => {
-        const { bridge, managed, client } = await getSessionClientForRepoLevel(ctx, bridgeSessionId);
+        const { managed, client } = await getSessionClientForRepoLevel(ctx, bridgeSessionId);
         return { vcs: json(await client.vcs()), files: json(await client.fileStatus()), managedServer: managed.baseUrl };
       })
   );

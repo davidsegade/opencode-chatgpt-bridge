@@ -4,12 +4,9 @@ import * as yaml from "yaml";
 import { minimatch } from "minimatch";
 import {
   IADevProfileSchema,
-  type IADevProfile,
-  type PathsConfig
+  type IADevProfile
 } from "../config/schema.js";
 import { validateFreeModel } from "../models/registry.js";
-
-const CONFIG_NAME = ".ia-dev.yml";
 
 function isRepoRelative(filePath: string): boolean {
   if (typeof filePath !== "string" || filePath.length === 0 || filePath.includes("\0")) return false;
