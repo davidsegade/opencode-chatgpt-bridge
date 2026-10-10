@@ -225,12 +225,84 @@ export async function getGitDiffIncludingUntracked(repoPath: string): Promise<Gi
     hasChanges
   };
 }
+export type PathFingerprint = {
+  path: string;
+  /** sha256 of the worktree content, or null when the file cannot be read. */
+  worktree: string | null;
+  /** Index state: staged blob hash, or null when the path is not in the index. */
+  index: string | null;
+  /** lstat mode, used to notice type changes (file <-> symlink). */
+  mode: number;
+  /** true when the path is absent from the worktree. */
+  absent: boolean;
+};
+
 export type GitSnapshot = {
   head: string;
   diff: string;
   stagedDiff: string;
   untracked: Array<{ path: string; hash: string; mode: number }>;
+  pathFingerprints: PathFingerprint[];
 };
+
+async function fingerprintPath(repoPath: string, filePath: string): Promise<PathFingerprint> {
+  const absolute = join(repoPath, filePath);
+  let worktree: string | null = null;
+  let mode = 0;
+  let absent = false;
+  try {
+    const info = await lstat(absolute);
+    mode = info.mode;
+    const content = info.isSymbolicLink() ? Buffer.from(await readlink(absolute)) : await readFile(absolute);
+    worktree = createHash("sha256").update(content).digest("hex");
+  } catch {
+    absent = true;
+  }
+  // --stage is the physical source of truth for what the index holds.
+  const stage = await gitNul(repoPath, ["ls-files", "--stage", "--", filePath]);
+  const index = stage[0] ? (stage[0].split(/\s+/)[1] ?? null) : null;
+  return { path: filePath, worktree, index, mode, absent };
+}
+
+/**
+ * Fingerprint the given paths through the physical filesystem and the index.
+ *
+ * This is what lets a caller tell "this path was already dirty before the task"
+ * from "the task changed it again": a pre-existing modification that the task
+ * leaves untouched keeps an identical fingerprint, while any further edit
+ * changes the worktree hash, the index entry, the mode or existence.
+ */
+export async function capturePathFingerprints(repoPath: string, filePaths: string[]): Promise<PathFingerprint[]> {
+  const unique = [...new Set(filePaths)].sort();
+  const fingerprints: PathFingerprint[] = [];
+  for (const filePath of unique) fingerprints.push(await fingerprintPath(repoPath, filePath));
+  return fingerprints;
+}
+
+/** Paths whose fingerprint differs between two captures. */
+export function changedFingerprints(
+  before: readonly PathFingerprint[],
+  after: readonly PathFingerprint[]
+): string[] {
+  const beforeByPath = new Map(before.map(entry => [entry.path, entry]));
+  const changed: string[] = [];
+  for (const entry of after) {
+    const prior = beforeByPath.get(entry.path);
+    if (!prior) {
+      changed.push(entry.path);
+      continue;
+    }
+    if (
+      prior.worktree !== entry.worktree ||
+      prior.index !== entry.index ||
+      prior.mode !== entry.mode ||
+      prior.absent !== entry.absent
+    ) {
+      changed.push(entry.path);
+    }
+  }
+  return changed.sort();
+}
 
 export async function captureGitSnapshot(repoPath: string, diff: GitDiff, head: string): Promise<GitSnapshot> {
   const untracked: GitSnapshot["untracked"] = [];
@@ -242,5 +314,9 @@ export async function captureGitSnapshot(repoPath: string, diff: GitDiff, head: 
     untracked.push({ path: file.path, hash: createHash("sha256").update(content).digest("hex"), mode: info.mode });
   }
   untracked.sort((a, b) => a.path < b.path ? -1 : a.path > b.path ? 1 : 0);
-  return { head, diff: diff.diff, stagedDiff: diff.stagedDiff, untracked };
+  const pathFingerprints = await capturePathFingerprints(
+    repoPath,
+    [...new Set([...diff.untracked.map(file => file.path)])]
+  );
+  return { head, diff: diff.diff, stagedDiff: diff.stagedDiff, untracked, pathFingerprints };
 }

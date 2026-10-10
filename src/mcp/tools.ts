@@ -19,7 +19,9 @@ import {
   getGitDiffWithStaged,
   assertClean,
   assertNotMain,
-  getGitDiffIncludingUntracked
+  getGitDiffIncludingUntracked,
+  capturePathFingerprints,
+  changedFingerprints
 } from "../git/repository.js";
 
 type RegisterContext = {
@@ -34,16 +36,32 @@ function json(value: unknown): JsonValue {
   return JSON.parse(JSON.stringify(value)) as JsonValue;
 }
 
-/**
- * Paths a task is responsible for: everything dirty in the final status that
- * was not already dirty before the task started. Paths already modified before
- * the run are not re-attributed to it, so requireClean:false with a dirty tree
- * does not blame the task for unrelated pre-existing work.
- */
 function newlyDirtyPaths(initial: GitStatus, final: GitStatus): string[] {
   const initialPaths = new Set([...initial.modified, ...initial.staged, ...initial.untracked]);
   const finalPaths = [...final.modified, ...final.staged, ...final.untracked];
-  return [...new Set(finalPaths.filter(filePath => !initialPaths.has(filePath)))];
+  return finalPaths.filter(filePath => !initialPaths.has(filePath));
+}
+
+/**
+ * Paths a task is responsible for, decided from physical fingerprints.
+ *
+ * `newlyDirtyPaths` covers paths that became dirty during the run.
+ * `changedFingerprints` additionally catches a path that was already dirty
+ * before the run and the task edited again: its worktree hash, index entry,
+ * mode or existence differs, so it is attributed to the task and validated.
+ * A pre-existing change the task never touched keeps its fingerprint and is
+ * never blamed on the agent. A change the task reverts to its pre-run state
+ * leaves no final diff, so it is not attributed to any path: attribution
+ * follows the final physical state, not every action the task took.
+ */
+function taskOwnedPaths(
+  initialStatus: GitStatus,
+  finalStatus: GitStatus,
+  changedByFingerprint: readonly string[]
+): string[] {
+  const newlyDirty = newlyDirtyPaths(initialStatus, finalStatus);
+  const finalPaths = [...new Set([...finalStatus.modified, ...finalStatus.staged, ...finalStatus.untracked])];
+  return [...new Set([...newlyDirty, ...changedByFingerprint])].sort().filter(path => finalPaths.includes(path));
 }
 
 /**
@@ -696,6 +714,14 @@ export function createBridgeMcpServer(ctx: RegisterContext): McpServer {
         const initialHead = initialStatus.head;
         const initialGitDiff = await getGitDiffIncludingUntracked(validated);
         const initialSnapshot = await captureGitSnapshot(validated, initialGitDiff, initialHead);
+        // Fingerprint every path that is already dirty so a later edit by the
+        // task can be told apart from work that was there beforehand.
+        const initialDirtyPaths = [...new Set([
+          ...initialStatus.modified,
+          ...initialStatus.staged,
+          ...initialStatus.untracked
+        ])];
+        const initialFingerprints = await capturePathFingerprints(validated, initialDirtyPaths);
 
         const managed = await ctx.processManager.ensure(validated);
         const client = ctx.processManager.clientFor(managed);
@@ -762,9 +788,21 @@ export function createBridgeMcpServer(ctx: RegisterContext): McpServer {
 
         let verificationError: string | undefined;
         let gitChanged = false;
+        let taskChangedPaths: string[] = [];
         try {
           const finalSnapshot = await captureGitSnapshot(validated, finalGitDiff, finalGitStatus.head);
           gitChanged = JSON.stringify(initialSnapshot) !== JSON.stringify(finalSnapshot);
+          const finalDirtyPaths = [...new Set([
+            ...finalGitStatus.modified,
+            ...finalGitStatus.staged,
+            ...finalGitStatus.untracked
+          ])];
+          const finalFingerprints = await capturePathFingerprints(validated, finalDirtyPaths);
+          taskChangedPaths = taskOwnedPaths(
+            initialStatus,
+            finalGitStatus,
+            changedFingerprints(initialFingerprints, finalFingerprints)
+          );
         } catch (error) {
           verificationError = error instanceof Error ? error.message : String(error);
         }
@@ -804,9 +842,9 @@ export function createBridgeMcpServer(ctx: RegisterContext): McpServer {
         }
 
         // Physical Git is the source of truth for what actually changed.
-        // Paths the task newly dirtied must satisfy the profile's write policy;
+        // Paths the task owned must satisfy the profile's write policy;
         // protected/sensitive paths win over write_paths.
-        const changedPaths = newlyDirtyPaths(initialStatus, finalGitStatus);
+        const changedPaths = taskChangedPaths;
         const deniedByPolicy = changedPaths.filter(filePath => !profileValidateWriteAccess(profile, filePath));
         const policyResult = {
           changedPaths,

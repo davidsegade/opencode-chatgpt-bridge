@@ -26,12 +26,23 @@ vi.mock("../src/git/repository.js", async (importOriginal) => {
   const actual = await importOriginal();
   return {
     ...actual,
-    captureGitSnapshot: vi.fn(async (_path, diff, head) => ({ head, diff: diff.diff, stagedDiff: diff.stagedDiff, untracked: diff.untracked })),
+    captureGitSnapshot: vi.fn(async (_path, diff, head) => ({
+      head,
+      diff: diff.diff,
+      stagedDiff: diff.stagedDiff,
+      untracked: diff.untracked,
+      pathFingerprints: []
+    })),
     validateGitRepo: vi.fn(),
     getGitStatus: vi.fn(),
     getGitDiffIncludingUntracked: vi.fn(),
     assertClean: vi.fn(),
-    assertNotMain: vi.fn()
+    assertNotMain: vi.fn(),
+    capturePathFingerprints: vi.fn(async (_repo: string, paths: string[]) =>
+      paths.map(path => ({ path, worktree: null, index: null, mode: 0, absent: true }))
+    ),
+    // Delegate to the real implementation so fingerprint comparison is exercised.
+    changedFingerprints: vi.fn(actual.changedFingerprints)
   };
 });
 
@@ -1468,5 +1479,145 @@ describe("MCP Tools - ia_dev_run_task post-hoc guards", () => {
     expect(content.ok).toBe(false);
     expect(content.error).toMatch(/outcome is unknown/);
     expect(mockClient.sendMessage).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("MCP Tools - dirty path attribution by fingerprint", () => {
+  const fp = (path: string, worktree: string | null, index: string | null) =>
+    ({ path, worktree, index, mode: 33188, absent: worktree === null });
+
+  function status(over: Record<string, unknown>) {
+    return {
+      repoPath: "/tmp/test/repo", topLevel: "/tmp/test/repo", branch: "feature-branch",
+      porcelain: "", untracked: [], modified: [], staged: [], ...over
+    };
+  }
+
+  /**
+   * One mock context per scenario. The git mocks go through the gitMocks
+   * overrides so no second createMockContext call can clobber them, and
+   * the snapshot/fingerprint mocks are wired on the module afterwards.
+   */
+  async function runScenario(initial: Record<string, unknown>, final: Record<string, unknown>,
+                             before: ReturnType<typeof fp>[], after: ReturnType<typeof fp>[]) {
+    const { config, processManager, state } = createMockContext({
+      gitMocks: {
+        getGitStatus: vi.fn()
+          .mockResolvedValueOnce(status({ head: "abc123", clean: false, ...initial }))
+          .mockResolvedValueOnce(status({ head: "def456", clean: false, ...final })),
+        getGitDiffIncludingUntracked: vi.fn()
+          .mockResolvedValueOnce({
+            repoPath: "/tmp/test/repo", topLevel: "/tmp/test/repo",
+            diff: "", stagedDiff: "", untracked: [], hasChanges: false
+          })
+          .mockResolvedValueOnce({
+            repoPath: "/tmp/test/repo", topLevel: "/tmp/test/repo",
+            diff: "diff --git a/x b/x\n@@ -1 +1 @@\n-a\n+b",
+            stagedDiff: "", untracked: [], hasChanges: true
+          }),
+        validateGitRepo: vi.fn().mockResolvedValue(status({ head: "abc123", isMainBranch: false })),
+        assertClean: vi.fn().mockResolvedValue(undefined),
+        assertNotMain: vi.fn().mockResolvedValue(undefined)
+      }
+    });
+    gitModule.captureGitSnapshot.mockReset()
+      .mockImplementationOnce(async (_p: string, diff: any, head: string) =>
+        ({ head, diff: diff.diff, stagedDiff: diff.stagedDiff, untracked: diff.untracked, pathFingerprints: [] }))
+      .mockImplementationOnce(async (_p: string, diff: any, head: string) =>
+        ({ head: `${head}-later`, diff: `${diff.diff}extra`, stagedDiff: diff.stagedDiff,
+           untracked: diff.untracked, pathFingerprints: [] }));
+    gitModule.capturePathFingerprints.mockReset()
+      .mockResolvedValueOnce(before)
+      .mockResolvedValueOnce(after);
+
+    const server = createBridgeMcpServer({
+      config, processManager: processManager as any, state: state as any
+    });
+    const tool = (server as any)._registeredTools?.ia_dev_run_task;
+    const result = await tool.handler({
+      repoPath: "/tmp/test/repo", prompt: "edit", requireClean: false,
+      timeoutMs: 10000, pollIntervalMs: 10, includeMessages: false
+    });
+    return result.structuredContent as any;
+  }
+
+  it("does not blame a pre-existing dirty file the task never touched", async () => {
+    const content = await runScenario(
+      { modified: ["existing.txt"] }, { modified: ["existing.txt"] },
+      [fp("existing.txt", "aaa", "bbb")], [fp("existing.txt", "aaa", "bbb")]
+    );
+    expect(content.success).toBe(true);
+    expect(content.pathPolicy.changedPaths).toEqual([]);
+    expect(content.pathPolicy.deniedPaths).toEqual([]);
+  });
+
+  it("fails when the task edits a pre-existing dirty file again outside write_paths", async () => {
+    const content = await runScenario(
+      { modified: ["existing.txt"] }, { modified: ["existing.txt"] },
+      [fp("existing.txt", "aaa", "bbb")], [fp("existing.txt", "zzz", "bbb")]
+    );
+    expect(content.success).toBe(false);
+    expect(content.pathPolicy.deniedPaths).toContain("existing.txt");
+    expect(content.error).toContain("outside the profile write policy");
+  });
+
+  it("fails when the task re-stages a pre-existing modified file", async () => {
+    const content = await runScenario(
+      { modified: ["existing.txt"] }, { staged: ["existing.txt"] },
+      [fp("existing.txt", "aaa", null)], [fp("existing.txt", "aaa", "ccc")]
+    );
+    expect(content.success).toBe(false);
+    expect(content.pathPolicy.deniedPaths).toContain("existing.txt");
+  });
+
+  it("allows a pre-existing dirty file re-touched inside write_paths", async () => {
+    const content = await runScenario(
+      { modified: ["src/pre.ts"] }, { modified: ["src/pre.ts"] },
+      [fp("src/pre.ts", "aaa", "bbb")], [fp("src/pre.ts", "zzz", "bbb")]
+    );
+    expect(content.success).toBe(true);
+    expect(content.pathPolicy.changedPaths).toContain("src/pre.ts");
+    expect(content.pathPolicy.deniedPaths).toEqual([]);
+  });
+
+  it("attributes a pre-existing untracked file the task overwrote", async () => {
+    const content = await runScenario(
+      { untracked: ["src/notes.ts"] }, { untracked: ["src/notes.ts"] },
+      [fp("src/notes.ts", "aaa", null)], [fp("src/notes.ts", "zzz", null)]
+    );
+    expect(content.success).toBe(true);
+    expect(content.pathPolicy.changedPaths).toContain("src/notes.ts");
+    expect(content.pathPolicy.deniedPaths).toEqual([]);
+  });
+
+  it("attributes a new file created by the task", async () => {
+    const content = await runScenario(
+      {}, { untracked: ["src/new.ts"] },
+      [], [fp("src/new.ts", "new", null)]
+    );
+    expect(content.success).toBe(true);
+    expect(content.pathPolicy.changedPaths).toEqual(["src/new.ts"]);
+    expect(content.pathPolicy.deniedPaths).toEqual([]);
+  });
+
+  it("does not attribute a pre-existing change the task reverted (documented limitation)", async () => {
+    const content = await runScenario(
+      { modified: ["reverted.txt"] }, { modified: [] },
+      [fp("reverted.txt", "aaa", "bbb")], []
+    );
+    // The revert is real task work, but the final physical state holds no
+    // diff for the path, so no path is attributed. MIGRATION.md documents
+    // this limitation explicitly.
+    expect(content.pathPolicy.changedPaths).toEqual([]);
+    expect(content.pathPolicy.deniedPaths).toEqual([]);
+  });
+
+  it("fails when the task edits a pre-existing protected file again", async () => {
+    const content = await runScenario(
+      { modified: [".github/workflows/ci.yml"] }, { modified: [".github/workflows/ci.yml"] },
+      [fp(".github/workflows/ci.yml", "aaa", "bbb")], [fp(".github/workflows/ci.yml", "zzz", "bbb")]
+    );
+    expect(content.success).toBe(false);
+    expect(content.pathPolicy.deniedPaths).toContain(".github/workflows/ci.yml");
   });
 });
