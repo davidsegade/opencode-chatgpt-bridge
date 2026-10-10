@@ -100,7 +100,10 @@ Recovery outcomes:
 `ia_dev_run_task` refuses to launch unless the target repo contains a valid `.ia-dev.yml` (copy `.ia-dev.yml.example`). The schema lives in `src/config/schema.ts`, loading and access checks in `src/security/profile.ts`.
 
 - `version` must be `"2.1"`; `profile` is one of `code-change|bugfix|refactor|test|docs|config`; `goal` needs at least 10 characters
-- `models.author` and `models.reviewer` are required and must be different (free models in practice)
+- `models.author` and `models.reviewer` are required, must be different, and must belong to the engine-owned free-model registry.
+- Before creating a task session, the bridge reads the managed server's `/provider` inventory. Both models must be active on a connected provider and advertise exactly zero input, output, cache-read and cache-write tariffs. Missing or malformed metadata blocks execution.
+- Explicit `providerID`/`modelID` overrides must be supplied together and pass the same checks. The reviewer model is excluded from author fallback. With only two registered models, quota exhaustion stops the task rather than reusing the reviewer.
+- Advertised zero tariffs are a preflight check, not a claim of observed execution cost. Model usage/cost telemetry and independent review remain separate requirements.
 - `paths` uses the 4-list permission model: `context_paths` (readable), `write_paths` (modifiable, empty = no writes allowed), `protected_paths` (never written), `sensitive_paths` (never read)
 - `limits` and `commands` are optional and fall back to defaults
 - The tool fails before sending any prompt when the profile is missing or `write_paths` is empty
@@ -276,3 +279,15 @@ pnpm run validate  # runs all three
 
 MIT
 OpenCode may omit idle sessions from `/session/status`. The bridge only infers completion when the latest assistant message has a completion timestamp and `finish: stop`, without an error, and a second status check still shows no active session. Missing status alone never implies success.
+
+
+## Bounded OpenCode HTTP requests
+
+The client limits ordinary HTTP requests (including provider inventory, status and async prompt acknowledgment) to 30 seconds by default. `OpencodeClientOptions.requestTimeoutMs` configures that limit. Synchronous generation and slash commands allow at least 10 minutes because their HTTP response can include the full model turn. The deadline covers both response headers and body.
+
+A deadline aborts the HTTP connection only: it does not cancel an OpenCode session or resend a task. `OPENCODE_REQUEST_TIMEOUT` means a mutation may already have been accepted; inspect its session before any manual retry. Successful and failed requests clear their timers.
+
+
+## Profile path precedence
+
+`sensitive_paths` deny both reads and writes, even when `context_paths` or `write_paths` also match. `protected_paths` deny writes. Relative paths are normalized for matching (separators and `.` segments); absolute paths, parent traversal and NUL bytes are rejected before normalization. The filesystem access validators and `opencode_read_file` also reject symlink components, including internal and dangling links, before delegating access. Proposed files under ordinary directories remain allowed. The checks do not read link targets. They are preflight checks, not a filesystem sandbox: concurrent path replacement can still create a race, and direct agent access requires separate enforcement.

@@ -1,7 +1,9 @@
-import { mkdtemp, mkdir, realpath, writeFile, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, realpath, writeFile, rm, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, beforeEach, afterEach } from "vitest";
+
+import { validateWriteAccess as profileValidateWriteAccess } from "../src/security/profile.js";
 
 import { listProjects, validateRepoPath, validateContextAccess, validateWriteAccess, validateProfileExists } from "../src/security/paths.js";
 
@@ -60,6 +62,36 @@ models:
 
   afterEach(async () => {
     await rm(repo, { recursive: true, force: true });
+  });
+
+  it.each(["file", "directory", "dangling", "internal"])("rejects %s symlinks for reads and writes", async kind => {
+    await mkdir(join(repo, "src/routes"), { recursive: true });
+    await writeFile(join(repo, ".env.fixture"), "synthetic fixture only");
+    const alias = "src/routes/alias.ts";
+    const target = kind === "dangling" ? join(repo, "missing") : kind === "directory" ? repo : kind === "internal" ? join(repo, "src/routes/target.ts") : join(repo, ".env.fixture");
+    if (kind === "internal") await writeFile(target, "ordinary fixture");
+    await symlink(target, join(repo, alias));
+    const filePath = kind === "directory" ? `${alias}/child.ts` : alias;
+    expect((await validateContextAccess(repo, [filePath])).deniedPaths).toEqual([filePath]);
+    expect((await validateWriteAccess(repo, [filePath])).deniedPaths).toEqual([filePath]);
+  });
+
+  it("rejects links to an external synthetic directory", async () => {
+    const outside = await mkdtemp(join(tmpdir(), "ia-symlink-fixture-"));
+    try {
+      await mkdir(join(repo, "src/routes"), { recursive: true });
+      await symlink(outside, join(repo, "src/routes/external"));
+      const filePath = "src/routes/external/new.ts";
+      expect((await validateContextAccess(repo, [filePath])).allowed).toBe(false);
+      expect((await validateWriteAccess(repo, [filePath])).allowed).toBe(false);
+    } finally { await rm(outside, { recursive: true, force: true }); }
+  });
+
+  it("allows ordinary existing files and creation under ordinary directories", async () => {
+    await mkdir(join(repo, "src/routes"), { recursive: true });
+    await writeFile(join(repo, "src/routes/file.ts"), "fixture");
+    expect((await validateContextAccess(repo, ["src/routes/file.ts"])).allowed).toBe(true);
+    expect((await validateWriteAccess(repo, ["src/routes/new/created.ts"])).allowed).toBe(true);
   });
 
   it("loads profile successfully", async () => {
@@ -166,6 +198,38 @@ models:
     expect(result.deniedPaths).toContain(".github/workflows/ci.yml");
     expect(result.deniedPaths).toContain("package-lock.json");
     expect(result.deniedPaths).not.toContain("src/routes/createRoute.ts");
+  });
+
+  it.each([
+    "src/routes/.env", "src/routes/.env.production", "src/routes/service.key",
+    "tests/.env.local", "src/routes/./.env", "src//routes//.env",
+    "src\\routes\\service.key"
+  ])("denies sensitive writes even inside write_paths: %s", async filePath => {
+    const result = await validateWriteAccess(repo, [filePath, "src/routes/allowed.ts"]);
+    expect(result.deniedPaths).toEqual([filePath]);
+    expect(result.allowed).toBe(false);
+  });
+
+  it("applies protected patterns to canonical relative paths", async () => {
+    const profile = await validateProfileExists(repo);
+    profile.paths.write_paths = ["**/*"];
+    profile.paths.protected_paths = ["src/routes/protected.ts"];
+    for (const filePath of ["src/routes/protected.ts", "src/./routes/protected.ts", "src//routes//protected.ts", "src/routes/protected.ts/."]) {
+      expect(profileValidateWriteAccess(profile, filePath)).toBe(false);
+    }
+    expect(profileValidateWriteAccess(profile, "src/routes/allowed.ts")).toBe(true);
+  });
+
+  it("normalizes benign path variants without broadening permissions", async () => {
+    const result = await validateContextAccess(repo, ["./src//routes/./allowed.ts", "src\\routes\\allowed.ts"]);
+    expect(result.allowed).toBe(true);
+    expect((await validateWriteAccess(repo, ["./src//routes/./allowed.ts"])).allowed).toBe(true);
+  });
+
+  it("denies paths containing NUL for both read and write", async () => {
+    const filePath = "src/routes/file\0.ts";
+    expect((await validateContextAccess(repo, [filePath])).deniedPaths).toEqual([filePath]);
+    expect((await validateWriteAccess(repo, [filePath])).deniedPaths).toEqual([filePath]);
   });
 
   it("denies write outside write_paths", async () => {

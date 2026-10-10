@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   findFreeModel,
+  validateLiveFreeModels,
   validateFreeModel,
   getFreeModelAliases,
   detectQuotaError,
@@ -97,5 +98,45 @@ describe("Free Model Registry", () => {
     expect(isFreeModel("mimo-v2.6-flash-free")).toBe(true);
     expect(isFreeModel("space-bunny-free")).toBe(true);
     expect(isFreeModel("gpt-4")).toBe(false);
+  });
+});
+
+describe("live free-only inventory", () => {
+  const primary = validateFreeModel("mimo-v2.6-flash-free");
+  function inventory() {
+    return { connected: ["opencode"], all: [{ id: "opencode", models: {
+      [primary.modelId]: { id: primary.modelId, status: "active", cost: { input: 0, output: 0, cache: { read: 0, write: 0 } } }
+    } }] };
+  }
+  it("accepts an active connected model with four zero tariffs", () => {
+    expect(validateLiveFreeModels(inventory(), [primary])).toEqual([primary]);
+  });
+  it.each([null, [], {}, { all: [], connected: [] }])("fails closed on missing inventory: %j", data => {
+    expect(() => validateLiveFreeModels(data, [primary])).toThrow();
+  });
+  it.each(["input", "output", "read", "write"])("rejects a nonzero %s tariff", tariff => {
+    const data = inventory(); const cost = data.all[0]!.models[primary.modelId]!.cost;
+    if (tariff === "read" || tariff === "write") cost.cache[tariff] = 0.01;
+    else cost[tariff as "input" | "output"] = 0.01;
+    expect(() => validateLiveFreeModels(data, [primary])).toThrow(/verified zero-cost/);
+  });
+  it("rejects disconnected providers", () => {
+    const data = inventory(); data.connected = [];
+    expect(() => validateLiveFreeModels(data, [primary])).toThrow();
+  });
+  it("rejects inactive models", () => {
+    const data = inventory(); data.all[0]!.models[primary.modelId]!.status = "deprecated";
+    expect(() => validateLiveFreeModels(data, [primary])).toThrow();
+  });
+  it("rejects missing cache tariffs", () => {
+    const data = inventory(); Reflect.deleteProperty(data.all[0]!.models[primary.modelId]!.cost, "cache");
+    expect(() => validateLiveFreeModels(data, [primary])).toThrow();
+  });
+  it("rejects ambiguous provider records", () => {
+    const data = inventory(); data.all.push(data.all[0]!);
+    expect(() => validateLiveFreeModels(data, [primary])).toThrow();
+  });
+  it("requires the independent reviewer to be available too", () => {
+    expect(() => validateLiveFreeModels(inventory(), [primary, validateFreeModel("space-bunny-free")])).toThrow();
   });
 });

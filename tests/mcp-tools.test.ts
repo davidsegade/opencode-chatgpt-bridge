@@ -4,7 +4,7 @@ import { createBridgeMcpServer } from "../src/mcp/tools.js";
 import type { BridgeConfig } from "../src/types.js";
 import { OpencodeProcessManager } from "../src/opencode/process.js";
 import { StateStore } from "../src/state/store.js";
-import { validateRepoPath, validateProfileExists } from "../src/security/paths.js";
+import { validateRepoPath, validateProfileExists, isSafeRepoFilePath } from "../src/security/paths.js";
 import * as gitModule from "../src/git/repository.js";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -16,7 +16,8 @@ vi.mock("../src/security/paths.js", async (importOriginal) => {
     ...actual,
     validateRepoPath: vi.fn(),
     listProjects: vi.fn(),
-    validateProfileExists: vi.fn()
+    validateProfileExists: vi.fn(),
+    isSafeRepoFilePath: vi.fn()
   };
 });
 
@@ -63,6 +64,8 @@ function createMockContext(overrides: Partial<{
     ...overrides.config
   };
 
+  vi.mocked(isSafeRepoFilePath).mockResolvedValue(true);
+
   const mockClient = {
     health: vi.fn().mockResolvedValue({ healthy: true, version: "1.0.0" }),
     createSession: vi.fn().mockResolvedValue({ id: "ses_test123", title: "Test Session" }),
@@ -72,7 +75,7 @@ function createMockContext(overrides: Partial<{
     getDiff: vi.fn().mockResolvedValue([{ path: "test.ts", diff: "+ console.log('hello')" }]),
     listAgents: vi.fn().mockResolvedValue([]),
     listCommands: vi.fn().mockResolvedValue([]),
-    listProviders: vi.fn().mockResolvedValue([]),
+    listProviders: vi.fn().mockResolvedValue({ connected: ["opencode"], all: [{ id: "opencode", models: Object.fromEntries(["mimo-v2.6-flash-free", "space-bunny-free"].map(id => [id, { id, status: "active", cost: { input: 0, output: 0, cache: { read: 0, write: 0 } } }])) }] }),
     getProviderAuthMethods: vi.fn().mockResolvedValue({}),
     getConfigProviders: vi.fn().mockResolvedValue({}),
     abortSession: vi.fn().mockResolvedValue(true),
@@ -509,6 +512,16 @@ describe("MCP Tools - session server recovery", () => {
     expect(content).toBeDefined();
     expect(content.file).toEqual({ content: "test file" });
     expect(mockClient.getSession).not.toHaveBeenCalled();
+  });
+
+  it("blocks unsafe filesystem paths before delegating a read", async () => {
+    const { config, processManager, state, mockClient } = createMockContext();
+    vi.mocked(isSafeRepoFilePath).mockResolvedValue(false);
+    const server = createBridgeMcpServer({ config, processManager: processManager as any, state: state as any });
+    const tool = (server as any)._registeredTools.opencode_read_file;
+    const result = await tool.handler({ bridgeSessionId: "test", path: "src/alias.ts" });
+    expect(result.structuredContent.ok).toBe(false);
+    expect(mockClient.readFile).not.toHaveBeenCalled();
   });
 
   it("denies opencode_read_file for sensitive_paths", async () => {

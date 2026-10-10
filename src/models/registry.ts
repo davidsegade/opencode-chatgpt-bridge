@@ -91,3 +91,35 @@ export function resolveFreeModelFallback(
 export function isFreeModel(identifier: string): boolean {
   return findFreeModel(identifier) !== undefined;
 }
+
+const ProviderInventorySchema = z.object({
+  connected: z.array(z.string()),
+  all: z.array(z.object({ id: z.string(), models: z.record(z.string(), z.unknown()) }))
+});
+const ZeroCostModelSchema = z.object({
+  id: z.string(),
+  status: z.literal("active"),
+  cost: z.object({
+    input: z.literal(0), output: z.literal(0),
+    cache: z.object({ read: z.literal(0), write: z.literal(0) })
+  })
+});
+
+/** Validate current advertised tariffs; this is not measured execution cost. */
+export function validateLiveFreeModels(inventory: unknown, required: FreeModel[]): FreeModel[] {
+  const parsed = ProviderInventorySchema.safeParse(inventory);
+  if (!parsed.success) throw new Error("Invalid OpenCode provider inventory; refusing unverified model costs.");
+  const available = FREE_MODELS.filter(model => {
+    if (!parsed.data.connected.includes(model.provider)) return false;
+    const providers = parsed.data.all.filter(provider => provider.id === model.provider);
+    if (providers.length !== 1) return false;
+    const live = ZeroCostModelSchema.safeParse(providers[0]!.models[model.modelId]);
+    return live.success && live.data.id === model.modelId;
+  });
+  for (const model of required) {
+    if (!available.some(candidate => candidate.provider === model.provider && candidate.modelId === model.modelId)) {
+      throw new Error(`Model ${model.provider}/${model.modelId} is not connected, active and verified zero-cost.`);
+    }
+  }
+  return available;
+}

@@ -4,9 +4,9 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod/v4";
 import type { BridgeConfig, JsonValue, OpencodeStatus } from "../types.js";
 import { isTerminalOpencodeStatus, isSuccessfulTerminalOpencodeStatus } from "../types.js";
-import { listProjects, validateRepoPath, validateProfileExists } from "../security/paths.js";
-import { validateReadAccess, loadProfile } from "../security/profile.js";
-import { validateFreeModel, detectQuotaError, resolveFreeModelFallback, type FreeModel, type QuotaError } from "../models/registry.js";
+import { listProjects, validateRepoPath, validateProfileExists, isSafeRepoFilePath } from "../security/paths.js";
+import { validateReadAccess, normalizeRelPath, loadProfile } from "../security/profile.js";
+import { validateFreeModel, detectQuotaError, resolveFreeModelFallback, validateLiveFreeModels, FREE_MODELS, type FreeModel } from "../models/registry.js";
 import { OpencodeProcessManager } from "../opencode/process.js";
 import { StateStore } from "../state/store.js";
 import { safeTool } from "./results.js";
@@ -300,7 +300,10 @@ export function createBridgeMcpServer(ctx: RegisterContext): McpServer {
         if (!validateReadAccess(profile, path)) {
           throw new Error(`Read denied by .ia-dev.yml: "${path}" is outside context_paths or matches sensitive_paths.`);
         }
-        return { file: json(await client.readFile(path)), managedServer: managed.baseUrl };
+        if (!await isSafeRepoFilePath(bridge.repoPath, path)) {
+          throw new Error(`Read denied: "${path}" contains a symlink or cannot be validated within the repository.`);
+        }
+        return { file: json(await client.readFile(normalizeRelPath(path))), managedServer: managed.baseUrl };
       })
   );
 
@@ -622,25 +625,14 @@ export function createBridgeMcpServer(ctx: RegisterContext): McpServer {
 
         const profile = await validateProfileExists(validated);
 
-        const primaryModel: FreeModel = input.providerID && input.modelID
-          ? { provider: input.providerID, modelId: input.modelID, alias: input.modelID }
-          : validateFreeModel(profile.models.author);
-
-        async function sendMessageWithFallback(model: FreeModel, tried: Set<string> = new Set()): Promise<void> {
-          tried.add(model.modelId);
-          try {
-await sendMessageWithFallback(primaryModel);
-          } catch (error) {
-            const quotaErr = detectQuotaError(error);
-            if (quotaErr && quotaErr.code !== "MODEL_NOT_FOUND") {
-              const fallback = resolveFreeModelFallback(model, tried);
-              if (fallback) {
-                await sendMessageWithFallback(fallback, tried);
-                return;
-              }
-            }
-            throw error;
-          }
+        if (Boolean(input.providerID) !== Boolean(input.modelID)) {
+          throw new Error("providerID and modelID must be supplied together.");
+        }
+        const primaryModel = validateFreeModel(input.providerID && input.modelID
+          ? `${input.providerID}/${input.modelID}` : profile.models.author);
+        const reviewerModel = validateFreeModel(profile.models.reviewer);
+        if (primaryModel.provider === reviewerModel.provider && primaryModel.modelId === reviewerModel.modelId) {
+          throw new Error("Author and reviewer must use different models.");
         }
 
         if (profile.paths.write_paths.length === 0) {
@@ -654,6 +646,11 @@ await sendMessageWithFallback(primaryModel);
 
         const managed = await ctx.processManager.ensure(validated);
         const client = ctx.processManager.clientFor(managed);
+        const verifiedModels = validateLiveFreeModels(await client.listProviders(), [primaryModel, reviewerModel]);
+        const unavailableModels = new Set([
+          reviewerModel.modelId,
+          ...FREE_MODELS.filter(model => !verifiedModels.some(verified => verified.provider === model.provider && verified.modelId === model.modelId)).map(model => model.modelId)
+        ]);
 
         const session = await client.createSession(input.title);
         const opencodeSessionId = String(session.id ?? session.ID ?? session.sessionID ?? "");
@@ -666,15 +663,28 @@ await sendMessageWithFallback(primaryModel);
           title: input.title
         });
 
-        await client.sendMessage({
-          sessionId: opencodeSessionId,
-          text: input.prompt,
-          async: true,
-          providerID: input.providerID,
-          modelID: input.modelID,
-          agent: input.agent,
-          system: input.system
-        });
+        async function sendMessageWithFallback(model: FreeModel, tried = new Set<string>(unavailableModels)): Promise<void> {
+          tried.add(model.modelId);
+          try {
+            await client.sendMessage({
+              sessionId: opencodeSessionId, text: input.prompt, async: true,
+              providerID: model.provider, modelID: model.modelId,
+              agent: input.agent, system: input.system
+            });
+          } catch (error) {
+            const quotaErr = detectQuotaError(error);
+            // Transport failures can mean the task was accepted: never resubmit.
+            if (quotaErr?.code === "QUOTA_EXCEEDED" || quotaErr?.code === "RATE_LIMITED") {
+              const fallback = resolveFreeModelFallback(model, tried);
+              if (fallback) {
+                await sendMessageWithFallback(fallback, tried);
+                return;
+              }
+            }
+            throw error;
+          }
+        }
+        await sendMessageWithFallback(primaryModel);
 
         const startTime = Date.now();
         let lastStatus: OpencodeStatus | null = null;

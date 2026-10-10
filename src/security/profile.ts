@@ -12,13 +12,13 @@ import { validateFreeModel } from "../models/registry.js";
 const CONFIG_NAME = ".ia-dev.yml";
 
 function isRepoRelative(filePath: string): boolean {
-  if (typeof filePath !== "string" || filePath.length === 0) return false;
+  if (typeof filePath !== "string" || filePath.length === 0 || filePath.includes("\0")) return false;
   if (posix.isAbsolute(filePath) || win32.isAbsolute(filePath)) return false;
   return !filePath.replaceAll("\\", "/").split("/").includes("..");
 }
 
-function normalizeRelPath(filePath: string): string {
-  return filePath.replaceAll("\\", "/").replace(/^\.\//, "");
+export function normalizeRelPath(filePath: string): string {
+  return posix.normalize(filePath.replaceAll("\\", "/")).replace(/\/$/, "");
 }
 
 export async function loadProfile(repoPath: string): Promise<IADevProfile> {
@@ -48,8 +48,8 @@ export function validateReadAccess(profile: IADevProfile, filePath: string): boo
 export function validateWriteAccess(profile: IADevProfile, filePath: string): boolean {
   if (!isRepoRelative(filePath)) return false;
   const normalized = normalizeRelPath(filePath);
-  const { write_paths, protected_paths } = profile.paths;
-  if (matchAny(normalized, protected_paths)) return false;
+  const { write_paths, protected_paths, sensitive_paths } = profile.paths;
+  if (matchAny(normalized, protected_paths) || matchAny(normalized, sensitive_paths)) return false;
   if (write_paths.length === 0) return false;
   return matchAny(normalized, write_paths);
 }

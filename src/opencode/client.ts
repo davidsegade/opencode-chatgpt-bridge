@@ -5,6 +5,7 @@ export type OpencodeClientOptions = {
   username?: string;
   password?: string;
   fetchImpl?: typeof fetch;
+  requestTimeoutMs?: number;
 };
 
 export type SendMessageInput = {
@@ -19,17 +20,30 @@ export type SendMessageInput = {
   async?: boolean;
 };
 
+export class OpencodeRequestTimeoutError extends Error {
+  readonly code = "OPENCODE_REQUEST_TIMEOUT";
+  constructor(method: string, path: string, timeoutMs: number) {
+    super(`OpenCode ${method} ${path} timed out after ${timeoutMs}ms; submission outcome may be unknown. No automatic retry.`);
+    this.name = "OpencodeRequestTimeoutError";
+  }
+}
+
 export class OpencodeClient {
   private readonly baseUrl: string;
   private readonly username?: string;
   private readonly password?: string;
   private readonly fetchImpl: typeof fetch;
+  private readonly requestTimeoutMs: number;
 
   constructor(options: OpencodeClientOptions) {
     this.baseUrl = options.baseUrl.replace(/\/$/, "");
     this.username = options.username;
     this.password = options.password;
     this.fetchImpl = options.fetchImpl ?? fetch;
+    this.requestTimeoutMs = options.requestTimeoutMs ?? 30000;
+    if (!Number.isSafeInteger(this.requestTimeoutMs) || this.requestTimeoutMs <= 0 || this.requestTimeoutMs > 2147483647) {
+      throw new Error("requestTimeoutMs must be a positive integer no greater than 2147483647.");
+    }
   }
 
   get url(): string {
@@ -49,19 +63,38 @@ export class OpencodeClient {
     return headers;
   }
 
-  private async request<T>(path: string, init: RequestInit = {}): Promise<T> {
-    const res = await this.fetchImpl(`${this.baseUrl}${path}`, {
-      ...init,
-      headers: this.headers(init.headers)
+  private async request<T>(path: string, init: RequestInit = {}, timeoutMs = this.requestTimeoutMs): Promise<T> {
+    const controller = new AbortController();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const deadline = new Promise<never>((_resolve, reject) => {
+      timer = setTimeout(() => {
+        const error = new OpencodeRequestTimeoutError(init.method ?? "GET", path, timeoutMs);
+        reject(error);
+        controller.abort(error);
+      }, timeoutMs);
     });
-    if (!res.ok) {
-      const body = await res.text().catch(() => "");
-      throw new Error(`opencode ${init.method ?? "GET"} ${path} failed: ${res.status} ${res.statusText}${body ? ` - ${body}` : ""}`);
+    const operation = async (): Promise<T> => {
+      const res = await this.fetchImpl(`${this.baseUrl}${path}`, {
+        ...init,
+        signal: controller.signal,
+        headers: this.headers(init.headers)
+      });
+      if (!res.ok) {
+        const body = await res.text().catch(() => "");
+        throw new Error(`opencode ${init.method ?? "GET"} ${path} failed: ${res.status} ${res.statusText}${body ? ` - ${body}` : ""}`);
+      }
+      if (res.status === 204) return undefined as T;
+      const text = await res.text();
+      if (!text) return undefined as T;
+      return JSON.parse(text) as T;
+    };
+    try {
+      // The deadline covers headers and body, even for a custom fetch that
+      // ignores AbortSignal. Aborting the HTTP request never aborts a session.
+      return await Promise.race([operation(), deadline]);
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
     }
-    if (res.status === 204) return undefined as T;
-    const text = await res.text();
-    if (!text) return undefined as T;
-    return JSON.parse(text) as T;
   }
 
   async health(): Promise<{ healthy: boolean; version?: string }> {
@@ -108,7 +141,7 @@ export class OpencodeClient {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body)
-    });
+    }, input.async ? this.requestTimeoutMs : Math.max(this.requestTimeoutMs, 600000));
   }
 
   async runCommand(sessionId: string, command: string, args?: string, agent?: string, modelID?: string): Promise<OpencodeMessage> {
@@ -116,7 +149,7 @@ export class OpencodeClient {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ command, arguments: args ?? "", agent, model: modelID ? { modelID } : undefined })
-    });
+    }, Math.max(this.requestTimeoutMs, 600000));
   }
 
   async getDiff(sessionId: string, messageID?: string): Promise<OpencodeDiff[]> {

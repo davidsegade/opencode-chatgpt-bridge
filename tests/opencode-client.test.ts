@@ -1,5 +1,5 @@
-import { describe, expect, it } from "vitest";
-import { OpencodeClient } from "../src/opencode/client.js";
+import { describe, expect, it, vi, afterEach } from "vitest";
+import { OpencodeClient, OpencodeRequestTimeoutError } from "../src/opencode/client.js";
 
 describe("OpencodeClient", () => {
   it("sends basic auth and JSON payloads", async () => {
@@ -46,5 +46,55 @@ describe("OpencodeClient", () => {
       "http://localhost:4096/provider/auth",
       "http://localhost:4096/config/providers"
     ]);
+  });
+});
+
+
+describe("bounded OpenCode requests", () => {
+  afterEach(() => vi.useRealTimers());
+  it.each([0, -1, 0.5, Infinity, NaN, 2147483648])("rejects invalid deadlines: %s", requestTimeoutMs => {
+    expect(() => new OpencodeClient({ baseUrl: "http://localhost", requestTimeoutMs })).toThrow(/requestTimeoutMs/);
+  });
+  it("bounds a fetch that ignores abort and never retries", async () => {
+    vi.useFakeTimers();
+    const fetchImpl = vi.fn<typeof fetch>(() => new Promise(() => {}));
+    const client = new OpencodeClient({ baseUrl: "http://localhost", fetchImpl, requestTimeoutMs: 50 });
+    const result = expect(client.listProviders()).rejects.toBeInstanceOf(OpencodeRequestTimeoutError);
+    await vi.advanceTimersByTimeAsync(50); await result;
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(fetchImpl.mock.calls[0]![1]!.signal!.aborted).toBe(true);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+  it("bounds a stalled response body after successful headers", async () => {
+    vi.useFakeTimers();
+    const fetchImpl: typeof fetch = async () => new Response(new ReadableStream({ start(controller) { controller.enqueue(new TextEncoder().encode('{')); } }));
+    const client = new OpencodeClient({ baseUrl: "http://localhost", fetchImpl, requestTimeoutMs: 50 });
+    const result = expect(client.health()).rejects.toMatchObject({ code: "OPENCODE_REQUEST_TIMEOUT" });
+    await vi.advanceTimersByTimeAsync(50); await result;
+  });
+  it("does not resubmit an async prompt when acknowledgment times out", async () => {
+    vi.useFakeTimers(); const fetchImpl = vi.fn<typeof fetch>(() => new Promise(() => {}));
+    const client = new OpencodeClient({ baseUrl: "http://localhost", fetchImpl, requestTimeoutMs: 50 });
+    const result = expect(client.sendMessage({ sessionId: "s", text: "test", async: true })).rejects.toMatchObject({ code: "OPENCODE_REQUEST_TIMEOUT" });
+    await vi.advanceTimersByTimeAsync(50); await result;
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(String(fetchImpl.mock.calls[0]![0])).toContain("prompt_async");
+  });
+  it("allows a bounded longer wait for synchronous generation", async () => {
+    vi.useFakeTimers(); let resolve!: (response: Response) => void;
+    const fetchImpl: typeof fetch = () => new Promise(done => { resolve = done; });
+    const client = new OpencodeClient({ baseUrl: "http://localhost", fetchImpl, requestTimeoutMs: 50 });
+    const result = client.sendMessage({ sessionId: "s", text: "test" });
+    await vi.advanceTimersByTimeAsync(51);
+    resolve(new Response(null, { status: 204 })); await result;
+    expect(vi.getTimerCount()).toBe(0);
+  });
+  it("clears the deadline after successful responses and ordinary errors", async () => {
+    vi.useFakeTimers();
+    const fetchImpl: typeof fetch = async () => new Response('{"healthy":true}');
+    const client = new OpencodeClient({ baseUrl: "http://localhost", fetchImpl });
+    expect(await client.health()).toEqual({ healthy: true }); expect(vi.getTimerCount()).toBe(0);
+    const failing = new OpencodeClient({ baseUrl: "http://localhost", fetchImpl: async () => { throw new Error("offline"); } });
+    await expect(failing.health()).rejects.toThrow("offline"); expect(vi.getTimerCount()).toBe(0);
   });
 });

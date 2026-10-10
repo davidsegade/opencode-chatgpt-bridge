@@ -1,7 +1,7 @@
-import { access, readdir, realpath, stat } from "node:fs/promises";
+import { access, readdir, realpath, stat, lstat } from "node:fs/promises";
 import { constants } from "node:fs";
 import { basename, isAbsolute, join, relative, resolve } from "node:path";
-import { loadProfile, validateReadAccess, validateWriteAccess as profileValidateWriteAccess } from "./profile.js";
+import { loadProfile, normalizeRelPath, validateReadAccess, validateWriteAccess as profileValidateWriteAccess } from "./profile.js";
 import type { IADevProfile } from "../config/schema.js";
 
 export type ProjectSummary = {
@@ -81,9 +81,31 @@ export async function listProjects(allowedRoots: string[], depth = 2): Promise<P
   return [...projects.values()].sort((a, b) => a.path.localeCompare(b.path));
 }
 
+/** Reject symlink components without reading their targets. Missing paths may
+ * be proposed for creation; filesystem errors other than ENOENT fail closed. */
+export async function isSafeRepoFilePath(repoPath: string, filePath: string): Promise<boolean> {
+  let current: string;
+  try { current = await realpath(repoPath); } catch { return false; }
+  const normalized = normalizeRelPath(filePath);
+  const segments = normalized.split("/");
+  if (normalized === "." || isAbsolute(normalized) || segments.includes("..") || normalized.includes("\0")) return false;
+  for (let index = 0; index < segments.length; index++) {
+    current = join(current, segments[index]!);
+    try {
+      const info = await lstat(current);
+      if (info.isSymbolicLink()) return false;
+      if (index < segments.length - 1 && !info.isDirectory()) return false;
+    } catch (error) {
+      return Boolean(error && typeof error === "object" && "code" in error && error.code === "ENOENT");
+    }
+  }
+  return true;
+}
+
 export async function validateContextAccess(repoPath: string, filePaths: string[]): Promise<AccessValidationResult> {
   const profile = await loadProfile(repoPath);
-  const deniedPaths = filePaths.filter((p) => !validateReadAccess(profile, p));
+  const decisions = await Promise.all(filePaths.map(async p => validateReadAccess(profile, p) && await isSafeRepoFilePath(repoPath, p)));
+  const deniedPaths = filePaths.filter((_p, index) => !decisions[index]);
   return {
     allowed: deniedPaths.length === 0,
     deniedPaths
@@ -92,7 +114,8 @@ export async function validateContextAccess(repoPath: string, filePaths: string[
 
 export async function validateWriteAccess(repoPath: string, filePaths: string[]): Promise<AccessValidationResult> {
   const profile = await loadProfile(repoPath);
-  const deniedPaths = filePaths.filter((p) => !profileValidateWriteAccess(profile, p));
+  const decisions = await Promise.all(filePaths.map(async p => profileValidateWriteAccess(profile, p) && await isSafeRepoFilePath(repoPath, p)));
+  const deniedPaths = filePaths.filter((_p, index) => !decisions[index]);
   return {
     allowed: deniedPaths.length === 0,
     deniedPaths

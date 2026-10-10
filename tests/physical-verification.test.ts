@@ -30,12 +30,49 @@ beforeEach(async () => {
 });
 afterEach(async () => { await rm(repo, { recursive: true, force: true }); });
 function bridge(action: () => Promise<unknown> = async () => {}, status = { type: "idle" }) {
-  const client = { createSession: vi.fn(async () => ({ id: "s" })), sendMessage: vi.fn(action), getSessionStatus: async () => ({ s: status }), getMessages: async () => [], getDiff: vi.fn(async () => [{ diff: "claimed change" }]), getSession: vi.fn(async (sessionId: string) => ({ id: sessionId, directory: repo })) };
+  const client = { listProviders: vi.fn(async () => ({ connected: ["opencode"], all: [{ id: "opencode", models: Object.fromEntries(["mimo-v2.6-flash-free", "space-bunny-free"].map(id => [id, { id, status: "active", cost: { input: 0, output: 0, cache: { read: 0, write: 0 } } }])) }] })), createSession: vi.fn(async () => ({ id: "s" })), sendMessage: vi.fn(action), getSessionStatus: async () => ({ s: status }), getMessages: async () => [], getDiff: vi.fn(async () => [{ diff: "claimed change" }]), getSession: vi.fn(async (sessionId: string) => ({ id: sessionId, directory: repo })) };
   const server = createBridgeMcpServer({ config: { allowedRoots: [repo] } as any, processManager: { ensure: async () => ({ baseUrl: "http://localhost:1" }), clientFor: () => client } as any, state: { createSession: async (x: unknown) => x, getSession: async () => ({ opencodeSessionId: "ses_old", repoPath: repo, baseUrl: "http://localhost:2" }), updateSession: async (_id: string, patch: Record<string, unknown>) => ({ opencodeSessionId: "ses_old", repoPath: repo, baseUrl: "http://localhost:1", ...patch }) } as any });
   const tool = (server as any)._registeredTools.ia_dev_run_task;
   return { server, client, run: async (extra = {}) => (await tool.handler(tool.inputSchema.parse({ repoPath: repo, prompt: "test", includeMessages: false, ...extra }))).structuredContent };
 }
 describe("physical task verification", () => {
+  it("rejects unavailable inventory before creating a task session", { timeout: 10000 }, async () => {
+    const b = bridge(); b.client.listProviders.mockRejectedValue(new Error("offline"));
+    expect((await b.run()).ok).toBe(false);
+    expect(b.client.createSession).not.toHaveBeenCalled();
+    expect(b.client.sendMessage).not.toHaveBeenCalled();
+  });
+  it("rejects a newly paid author before creating a task session", { timeout: 10000 }, async () => {
+    const b = bridge(); const inventory = await b.client.listProviders();
+    inventory.all[0]!.models["mimo-v2.6-flash-free"]!.cost.input = 1;
+    b.client.listProviders.mockResolvedValue(inventory);
+    expect((await b.run()).error).toContain("verified zero-cost");
+    expect(b.client.createSession).not.toHaveBeenCalled();
+    expect(b.client.sendMessage).not.toHaveBeenCalled();
+  });
+
+  it("sends the profile author model explicitly once", { timeout: 10000 }, async () => {
+    const b = bridge(async () => writeFile(join(repo, "tracked.txt"), "edit"));
+    expect((await b.run()).success).toBe(true);
+    expect(b.client.sendMessage).toHaveBeenCalledTimes(1);
+    expect(b.client.sendMessage).toHaveBeenCalledWith(expect.objectContaining({ providerID: "opencode", modelID: "mimo-v2.6-flash-free" }));
+  });
+  it.each([
+    { providerID: "paid", modelID: "mimo-v2.6-flash-free" },
+    { providerID: "opencode", modelID: "paid-model" },
+    { providerID: "opencode" }, { modelID: "mimo-v2.6-flash-free" },
+    { providerID: "opencode", modelID: "space-bunny-free" }
+  ])("rejects unsafe model overrides before session creation: %j", { timeout: 10000 }, async override => {
+    const b = bridge(); expect((await b.run(override)).ok).toBe(false);
+    expect(b.client.createSession).not.toHaveBeenCalled();
+    expect(b.client.sendMessage).not.toHaveBeenCalled();
+  });
+  it.each(["Quota exceeded", "Rate limited: 429", "Provider unavailable: 503", "Connection refused"])("does not reuse reviewer or duplicate uncertain submissions: %s", { timeout: 10000 }, async message => {
+    const b = bridge(async () => { throw new Error(message); });
+    expect((await b.run()).ok).toBe(false);
+    expect(b.client.sendMessage).toHaveBeenCalledTimes(1);
+  });
+
   it("does not treat a legacy idle field as overriding a current error", () => {
     expect(isSuccessfulTerminalOpencodeStatus({ type: "error", status: "idle" })).toBe(false);
     expect(isSuccessfulTerminalOpencodeStatus({ status: "completed" })).toBe(true);
