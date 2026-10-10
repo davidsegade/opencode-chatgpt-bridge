@@ -43,10 +43,6 @@ export function getFreeModelAliases(): string[] {
   return FREE_MODELS.map((m) => m.alias);
 }
 
-export function getFreeModelProviders(): string[] {
-  return [...new Set(FREE_MODELS.map((m) => m.provider))];
-}
-
 export type QuotaErrorCode = "QUOTA_EXCEEDED" | "RATE_LIMITED";
 
 export class QuotaError extends Error {
