@@ -6,11 +6,10 @@ import {
   validateFreeModel,
   getFreeModelAliases,
   detectQuotaError,
-  resolveFreeModelFallback,
-  isFreeModel,
-  type FreeModel,
-  type QuotaError
+  isSubmissionOutcomeUnknown,
+  isFreeModel
 } from "../src/models/registry.js";
+import { OpencodeHttpError, OpencodeRequestTimeoutError } from "../src/opencode/client.js";
 
 describe("Free Model Registry", () => {
   it("finds model by alias", () => {
@@ -48,51 +47,40 @@ describe("Free Model Registry", () => {
     expect(aliases.length).toBeGreaterThanOrEqual(2);
   });
 
-  it("detects quota exceeded error", () => {
-    const error = new Error("Quota exceeded for model");
-    const detected = detectQuotaError(error);
-    expect(detected).toBeDefined();
+  it("classifies HTTP 429 as a rate-limit rejection", () => {
+    const detected = detectQuotaError(new OpencodeHttpError(429, "Too Many Requests", "/session/s/message", "slow down"));
+    expect(detected?.code).toBe("RATE_LIMITED");
+    expect(detected?.status).toBe(429);
+  });
+
+  it("classifies HTTP 402 as a quota rejection", () => {
+    const detected = detectQuotaError(new OpencodeHttpError(402, "Payment Required", "/session/s/message", ""));
     expect(detected?.code).toBe("QUOTA_EXCEEDED");
   });
 
-  it("detects rate limited error", () => {
-    const error = new Error("Rate limited: 429 Too Many Requests");
-    const detected = detectQuotaError(error);
-    expect(detected).toBeDefined();
-    expect(detected?.code).toBe("RATE_LIMITED");
+  it.each([400, 401, 404, 422, 500, 502, 503])("does not classify HTTP %i as a quota rejection", status => {
+    expect(detectQuotaError(new OpencodeHttpError(status, "x", "/session/s/message", "rate limit exceeded"))).toBeUndefined();
   });
 
-  it("detects provider unavailable error", () => {
-    const error = new Error("Provider unavailable: 503 Service Unavailable");
-    const detected = detectQuotaError(error);
-    expect(detected).toBeDefined();
-    expect(detected?.code).toBe("PROVIDER_UNAVAILABLE");
+  it("never classifies from provider-controlled body text on a plain Error", () => {
+    expect(detectQuotaError(new Error("429 rate limit quota exceeded"))).toBeUndefined();
+    expect(detectQuotaError(new Error("max_tokens exceeded"))).toBeUndefined();
   });
 
-  it("detects model not found error", () => {
-    const error = new Error("Model not found: 404");
-    const detected = detectQuotaError(error);
-    expect(detected).toBeDefined();
-    expect(detected?.code).toBe("MODEL_NOT_FOUND");
+  it("does not classify a deadline as a quota rejection", () => {
+    expect(detectQuotaError(new OpencodeRequestTimeoutError("POST", "/session/s/prompt_async", 30000))).toBeUndefined();
   });
 
-  it("returns undefined for unrelated error", () => {
-    const error = new Error("Network timeout");
-    expect(detectQuotaError(error)).toBeUndefined();
+  it("treats deadlines, 5xx and transport errors as unknown outcomes", () => {
+    expect(isSubmissionOutcomeUnknown(new OpencodeRequestTimeoutError("POST", "/p", 30000))).toBe(true);
+    expect(isSubmissionOutcomeUnknown(new OpencodeHttpError(500, "x", "/p", ""))).toBe(true);
+    expect(isSubmissionOutcomeUnknown(new OpencodeHttpError(503, "x", "/p", ""))).toBe(true);
+    expect(isSubmissionOutcomeUnknown(new Error("socket hang up"))).toBe(true);
   });
 
-  it("resolves fallback from same provider excluding tried", () => {
-    const primary: FreeModel = { provider: "opencode", modelId: "mimo-v2.6-flash-free", alias: "mimo-v2.6-flash-free" };
-    const fallback = resolveFreeModelFallback(primary, new Set(["mimo-v2.6-flash-free"]));
-    expect(fallback).toBeDefined();
-    expect(fallback?.modelId).toBe("space-bunny-free");
-    expect(fallback?.provider).toBe("opencode");
-  });
-
-  it("returns undefined when no fallback available", () => {
-    const primary: FreeModel = { provider: "opencode", modelId: "mimo-v2.6-flash-free", alias: "mimo-v2.6-flash-free" };
-    const fallback = resolveFreeModelFallback(primary, new Set(["mimo-v2.6-flash-free", "space-bunny-free"]));
-    expect(fallback).toBeUndefined();
+  it("does not treat an explicit quota rejection as an unknown outcome", () => {
+    expect(isSubmissionOutcomeUnknown(new OpencodeHttpError(429, "Too Many Requests", "/p", ""))).toBe(false);
+    expect(isSubmissionOutcomeUnknown(new OpencodeHttpError(400, "Bad Request", "/p", ""))).toBe(false);
   });
 
   it("isFreeModel returns true for registered models", () => {

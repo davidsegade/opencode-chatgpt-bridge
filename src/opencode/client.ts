@@ -28,6 +28,21 @@ export class OpencodeRequestTimeoutError extends Error {
   }
 }
 
+/** A non-2xx response. Carries the structured status so callers never have to
+ * guess from the response body, which is provider-controlled free text. */
+export class OpencodeHttpError extends Error {
+  readonly code = "OPENCODE_HTTP_ERROR";
+  constructor(
+    readonly status: number,
+    readonly statusText: string,
+    readonly path: string,
+    readonly body: string
+  ) {
+    super(`opencode ${status} ${statusText} on ${path}${body ? ` - ${body}` : ""}`);
+    this.name = "OpencodeHttpError";
+  }
+}
+
 export class OpencodeClient {
   private readonly baseUrl: string;
   private readonly username?: string;
@@ -81,7 +96,7 @@ export class OpencodeClient {
       });
       if (!res.ok) {
         const body = await res.text().catch(() => "");
-        throw new Error(`opencode ${init.method ?? "GET"} ${path} failed: ${res.status} ${res.statusText}${body ? ` - ${body}` : ""}`);
+        throw new OpencodeHttpError(res.status, res.statusText, path, body);
       }
       if (res.status === 204) return undefined as T;
       const text = await res.text();

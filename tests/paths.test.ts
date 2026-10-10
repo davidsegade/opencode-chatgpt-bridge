@@ -58,6 +58,23 @@ models:
   author: "mimo-v2.6-flash-free"
   reviewer: "space-bunny-free"
 `);
+    // Read validation now fails closed on missing files, so the fixtures the
+    // read tests rely on must exist on disk.
+    await mkdir(join(repo, "src/routes"), { recursive: true });
+    await mkdir(join(repo, "tests"), { recursive: true });
+    await mkdir(join(repo, "config/secrets"), { recursive: true });
+    for (const file of [
+      "src/routes/createRoute.ts",
+      "tests/unit.test.ts",
+      "tests/auth.test.ts",
+      "package.json",
+      ".env.production",
+      "config/secrets/key.pem",
+      "src/routes/allowed.ts",
+      "src/routes/protected.ts"
+    ]) {
+      await writeFile(join(repo, file), "synthetic fixture only");
+    }
   });
 
   afterEach(async () => {
@@ -85,6 +102,17 @@ models:
       expect((await validateContextAccess(repo, [filePath])).allowed).toBe(false);
       expect((await validateWriteAccess(repo, [filePath])).allowed).toBe(false);
     } finally { await rm(outside, { recursive: true, force: true }); }
+  });
+
+  it("does not report a missing file as readable", async () => {
+    const missing = "src/routes/never-created.ts";
+    expect((await validateContextAccess(repo, [missing])).deniedPaths).toEqual([missing]);
+    // The same path is a legitimate write target.
+    expect((await validateWriteAccess(repo, [missing])).allowed).toBe(true);
+  });
+
+  it("does not report a directory as readable", async () => {
+    expect((await validateContextAccess(repo, ["src/routes"])).deniedPaths).toEqual(["src/routes"]);
   });
 
   it("allows ordinary existing files and creation under ordinary directories", async () => {

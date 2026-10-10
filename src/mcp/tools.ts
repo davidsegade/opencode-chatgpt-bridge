@@ -3,10 +3,12 @@ import { resolveSessionStatus } from "../opencode/status.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod/v4";
 import type { BridgeConfig, JsonValue, OpencodeStatus } from "../types.js";
+import type { GitStatus } from "../git/repository.js";
 import { isTerminalOpencodeStatus, isSuccessfulTerminalOpencodeStatus } from "../types.js";
 import { listProjects, validateRepoPath, validateProfileExists, isSafeRepoFilePath } from "../security/paths.js";
-import { validateReadAccess, normalizeRelPath, loadProfile } from "../security/profile.js";
-import { validateFreeModel, detectQuotaError, resolveFreeModelFallback, validateLiveFreeModels, FREE_MODELS, type FreeModel } from "../models/registry.js";
+import { validateReadAccess, validateWriteAccess as profileValidateWriteAccess, normalizeRelPath } from "../security/profile.js";
+import { validateFreeModel, detectQuotaError, isSubmissionOutcomeUnknown, validateLiveFreeModels, validateObservedFreeUsage, type FreeModel } from "../models/registry.js";
+import type { OpencodeClient } from "../opencode/client.js";
 import { OpencodeProcessManager } from "../opencode/process.js";
 import { StateStore } from "../state/store.js";
 import { safeTool } from "./results.js";
@@ -30,6 +32,43 @@ function json<T extends Record<string, unknown>>(value: T): T;
 function json(value: unknown): JsonValue;
 function json(value: unknown): JsonValue {
   return JSON.parse(JSON.stringify(value)) as JsonValue;
+}
+
+/**
+ * Paths a task is responsible for: everything dirty in the final status that
+ * was not already dirty before the task started. Paths already modified before
+ * the run are not re-attributed to it, so requireClean:false with a dirty tree
+ * does not blame the task for unrelated pre-existing work.
+ */
+function newlyDirtyPaths(initial: GitStatus, final: GitStatus): string[] {
+  const initialPaths = new Set([...initial.modified, ...initial.staged, ...initial.untracked]);
+  const finalPaths = [...final.modified, ...final.staged, ...final.untracked];
+  return [...new Set(finalPaths.filter(filePath => !initialPaths.has(filePath)))];
+}
+
+/**
+ * Single free-only entry point for every tool that can put a model on the wire.
+ *
+ * Fails closed: an explicit override must name a registry model, and either an
+ * override or the profile author must additionally be verified against the live
+ * provider inventory before any prompt is submitted. When free-only cannot be
+ * established the prompt is not sent.
+ */
+async function resolveFreeOnlyModel(
+  client: OpencodeClient,
+  repoPath: string,
+  override: { providerID?: string; modelID?: string }
+): Promise<FreeModel> {
+  if (Boolean(override.providerID) !== Boolean(override.modelID)) {
+    throw new Error("providerID and modelID must be supplied together.");
+  }
+  const profile = override.providerID ? null : await validateProfileExists(repoPath);
+  const model = validateFreeModel(
+    override.providerID && override.modelID ? `${override.providerID}/${override.modelID}` : profile!.models.author
+  );
+  const required = profile ? [model, validateFreeModel(profile.models.reviewer)] : [model];
+  validateLiveFreeModels(await client.listProviders(), required);
+  return model;
 }
 
 async function getSessionClient(ctx: RegisterContext, bridgeSessionId: string) {
@@ -205,18 +244,28 @@ export function createBridgeMcpServer(ctx: RegisterContext): McpServer {
     async (input) =>
       safeTool(async () => {
         const { bridge, managed, client } = await getSessionClient(ctx, input.bridgeSessionId);
+        const model = await resolveFreeOnlyModel(client, bridge.repoPath, {
+          providerID: input.providerID,
+          modelID: input.modelID
+        });
         const response = await client.sendMessage({
           sessionId: bridge.opencodeSessionId,
           text: input.text,
           async: input.async,
-          providerID: input.providerID,
-          modelID: input.modelID,
+          providerID: model.provider,
+          modelID: model.modelId,
           agent: input.agent,
           system: input.system,
           noReply: input.noReply
         });
         await ctx.state.updateSession(input.bridgeSessionId, {});
-        return { ok: true, async: input.async, response: json(response ?? null), managedServer: managed.baseUrl };
+        return {
+          ok: true,
+          async: input.async,
+          model: { providerID: model.provider, modelID: model.modelId },
+          response: json(response ?? null),
+          managedServer: managed.baseUrl
+        };
       })
   );
 
@@ -300,7 +349,7 @@ export function createBridgeMcpServer(ctx: RegisterContext): McpServer {
         if (!validateReadAccess(profile, path)) {
           throw new Error(`Read denied by .ia-dev.yml: "${path}" is outside context_paths or matches sensitive_paths.`);
         }
-        if (!await isSafeRepoFilePath(bridge.repoPath, path)) {
+        if (!await isSafeRepoFilePath(bridge.repoPath, path, "read")) {
           throw new Error(`Read denied: "${path}" contains a symlink or cannot be validated within the repository.`);
         }
         return { file: json(await client.readFile(normalizeRelPath(path))), managedServer: managed.baseUrl };
@@ -474,6 +523,10 @@ export function createBridgeMcpServer(ctx: RegisterContext): McpServer {
         const validated = await validateRepoPath(input.repoPath, ctx.config.allowedRoots);
         const managed = await ctx.processManager.ensure(validated);
         const client = ctx.processManager.clientFor(managed);
+        const model = await resolveFreeOnlyModel(client, validated, {
+          providerID: input.providerID,
+          modelID: input.modelID
+        });
 
         const session = await client.createSession(input.title);
         const opencodeSessionId = String(session.id ?? session.ID ?? session.sessionID ?? "");
@@ -490,8 +543,8 @@ export function createBridgeMcpServer(ctx: RegisterContext): McpServer {
           sessionId: opencodeSessionId,
           text: input.prompt,
           async: true,
-          providerID: input.providerID,
-          modelID: input.modelID,
+          providerID: model.provider,
+          modelID: model.modelId,
           agent: input.agent,
           system: input.system
         });
@@ -646,11 +699,7 @@ export function createBridgeMcpServer(ctx: RegisterContext): McpServer {
 
         const managed = await ctx.processManager.ensure(validated);
         const client = ctx.processManager.clientFor(managed);
-        const verifiedModels = validateLiveFreeModels(await client.listProviders(), [primaryModel, reviewerModel]);
-        const unavailableModels = new Set([
-          reviewerModel.modelId,
-          ...FREE_MODELS.filter(model => !verifiedModels.some(verified => verified.provider === model.provider && verified.modelId === model.modelId)).map(model => model.modelId)
-        ]);
+        validateLiveFreeModels(await client.listProviders(), [primaryModel, reviewerModel]);
 
         const session = await client.createSession(input.title);
         const opencodeSessionId = String(session.id ?? session.ID ?? session.sessionID ?? "");
@@ -663,28 +712,31 @@ export function createBridgeMcpServer(ctx: RegisterContext): McpServer {
           title: input.title
         });
 
-        async function sendMessageWithFallback(model: FreeModel, tried = new Set<string>(unavailableModels)): Promise<void> {
-          tried.add(model.modelId);
-          try {
-            await client.sendMessage({
-              sessionId: opencodeSessionId, text: input.prompt, async: true,
-              providerID: model.provider, modelID: model.modelId,
-              agent: input.agent, system: input.system
-            });
-          } catch (error) {
-            const quotaErr = detectQuotaError(error);
-            // Transport failures can mean the task was accepted: never resubmit.
-            if (quotaErr?.code === "QUOTA_EXCEEDED" || quotaErr?.code === "RATE_LIMITED") {
-              const fallback = resolveFreeModelFallback(model, tried);
-              if (fallback) {
-                await sendMessageWithFallback(fallback, tried);
-                return;
-              }
-            }
-            throw error;
+        // Submitted exactly once. The registry holds no alternative author model
+        // that is not the reviewer, so a quota rejection stops the task instead
+        // of silently re-running the prompt under a different model.
+        try {
+          await client.sendMessage({
+            sessionId: opencodeSessionId, text: input.prompt, async: true,
+            providerID: primaryModel.provider, modelID: primaryModel.modelId,
+            agent: input.agent, system: input.system
+          });
+        } catch (error) {
+          const quotaErr = detectQuotaError(error);
+          if (quotaErr) {
+            throw new Error(
+              `Author model ${primaryModel.provider}/${primaryModel.modelId} was rejected with HTTP ${quotaErr.status} (${quotaErr.code}). ` +
+              `No alternative free author model is registered, and the prompt was not resubmitted.`
+            );
           }
+          if (isSubmissionOutcomeUnknown(error)) {
+            throw new Error(
+              `Prompt submission outcome is unknown for ${primaryModel.provider}/${primaryModel.modelId}; it was NOT resubmitted. ` +
+              `Inspect session ${opencodeSessionId} before retrying manually. Cause: ${error instanceof Error ? error.message : String(error)}`
+            );
+          }
+          throw error;
         }
-        await sendMessageWithFallback(primaryModel);
 
         const startTime = Date.now();
         let lastStatus: OpencodeStatus | null = null;
@@ -751,7 +803,46 @@ export function createBridgeMcpServer(ctx: RegisterContext): McpServer {
           return { ...baseResult, success: false, error: "OpenCode completed but no Git changes detected. Task may have failed to produce changes." };
         }
 
-        const successResult = { ...baseResult, success: true };
+        // Physical Git is the source of truth for what actually changed.
+        // Paths the task newly dirtied must satisfy the profile's write policy;
+        // protected/sensitive paths win over write_paths.
+        const changedPaths = newlyDirtyPaths(initialStatus, finalGitStatus);
+        const deniedByPolicy = changedPaths.filter(filePath => !profileValidateWriteAccess(profile, filePath));
+        const policyResult = {
+          changedPaths,
+          deniedPaths: deniedByPolicy
+        };
+
+        if (deniedByPolicy.length > 0) {
+          return {
+            ...baseResult,
+            success: false,
+            error: `Task modified paths outside the profile write policy: ${deniedByPolicy.join(", ")}.`,
+            pathPolicy: json(policyResult)
+          };
+        }
+
+        // Post-hoc evidence of the model that actually ran, from the
+        // providerID/modelID/cost recorded on each assistant turn.
+        let observedUsage;
+        try {
+          const messages = await client.getMessages(opencodeSessionId, input.messageLimit);
+          observedUsage = json(validateObservedFreeUsage(messages));
+        } catch (error) {
+          return {
+            ...baseResult,
+            success: false,
+            pathPolicy: json(policyResult),
+            error: `Could not verify that the session stayed on a free model: ${error instanceof Error ? error.message : String(error)}`
+          };
+        }
+
+        const successResult = {
+          ...baseResult,
+          success: true,
+          pathPolicy: json(policyResult),
+          observedUsage
+        };
 
         if (input.includeMessages && lastStatus) {
           try {

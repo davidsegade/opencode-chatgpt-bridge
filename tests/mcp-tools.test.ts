@@ -6,6 +6,7 @@ import { OpencodeProcessManager } from "../src/opencode/process.js";
 import { StateStore } from "../src/state/store.js";
 import { validateRepoPath, validateProfileExists, isSafeRepoFilePath } from "../src/security/paths.js";
 import * as gitModule from "../src/git/repository.js";
+import { OpencodeHttpError, OpencodeRequestTimeoutError } from "../src/opencode/client.js";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -373,18 +374,111 @@ describe("MCP Tools - launch_task", () => {
     await tool.handler({
       repoPath: join(allowedRoot, "repo-test"),
       prompt: "Test prompt",
-      providerID: "anthropic",
-      modelID: "claude-3-haiku",
+      providerID: "opencode",
+      modelID: "mimo-v2.6-flash-free",
       agent: "coder",
       system: "You are a helpful assistant"
     });
 
     expect(mockClient.sendMessage).toHaveBeenCalledWith(expect.objectContaining({
-      providerID: "anthropic",
-      modelID: "claude-3-haiku",
+      providerID: "opencode",
+      modelID: "mimo-v2.6-flash-free",
       agent: "coder",
       system: "You are a helpful assistant"
     }));
+  });
+
+  it("refuses a paid model on opencode_launch_task", async () => {
+    const { config, processManager, state, mockClient } = createMockContext({
+      config: { allowedRoots: [allowedRoot] }
+    });
+    const server = createBridgeMcpServer({ config, processManager: processManager as any, state: state as any });
+
+    const tool = (server as any)._registeredTools?.opencode_launch_task;
+    const result = await tool.handler({
+      repoPath: join(allowedRoot, "repo-test"),
+      prompt: "Test prompt",
+      providerID: "anthropic",
+      modelID: "claude-3-haiku"
+    });
+
+    const content = result.structuredContent as any;
+    expect(content.ok).toBe(false);
+    expect(content.error).toMatch(/free-model registry/);
+    expect(mockClient.sendMessage).not.toHaveBeenCalled();
+  });
+
+  it("refuses a half-specified model override on opencode_launch_task", async () => {
+    const { config, processManager, state, mockClient } = createMockContext({
+      config: { allowedRoots: [allowedRoot] }
+    });
+    const server = createBridgeMcpServer({ config, processManager: processManager as any, state: state as any });
+
+    const tool = (server as any)._registeredTools?.opencode_launch_task;
+    const result = await tool.handler({
+      repoPath: join(allowedRoot, "repo-test"),
+      prompt: "Test prompt",
+      providerID: "opencode"
+    });
+
+    const content = result.structuredContent as any;
+    expect(content.ok).toBe(false);
+    expect(content.error).toMatch(/must be supplied together/);
+    expect(mockClient.sendMessage).not.toHaveBeenCalled();
+  });
+
+  it("refuses a paid model on opencode_send_message", async () => {
+    const { config, processManager, state, mockClient } = createMockContext();
+    const server = createBridgeMcpServer({ config, processManager: processManager as any, state: state as any });
+
+    const tool = (server as any)._registeredTools?.opencode_send_message;
+    const result = await tool.handler({
+      bridgeSessionId: "bridge_test123",
+      text: "hello",
+      providerID: "openai",
+      modelID: "gpt-4o"
+    });
+
+    const content = result.structuredContent as any;
+    expect(content.ok).toBe(false);
+    expect(content.error).toMatch(/free-model registry/);
+    expect(mockClient.sendMessage).not.toHaveBeenCalled();
+  });
+
+  it("refuses a half-specified model override on opencode_send_message", async () => {
+    const { config, processManager, state, mockClient } = createMockContext();
+    const server = createBridgeMcpServer({ config, processManager: processManager as any, state: state as any });
+
+    const tool = (server as any)._registeredTools?.opencode_send_message;
+    const result = await tool.handler({
+      bridgeSessionId: "bridge_test123",
+      text: "hello",
+      modelID: "mimo-v2.6-flash-free"
+    });
+
+    const content = result.structuredContent as any;
+    expect(content.ok).toBe(false);
+    expect(content.error).toMatch(/must be supplied together/);
+    expect(mockClient.sendMessage).not.toHaveBeenCalled();
+  });
+
+  it("fails closed on opencode_send_message when the provider inventory is unusable", async () => {
+    const { config, processManager, state, mockClient } = createMockContext();
+    mockClient.listProviders.mockResolvedValue({ connected: [], all: [] });
+    const server = createBridgeMcpServer({ config, processManager: processManager as any, state: state as any });
+
+    const tool = (server as any)._registeredTools?.opencode_send_message;
+    const result = await tool.handler({
+      bridgeSessionId: "bridge_test123",
+      text: "hello",
+      providerID: "opencode",
+      modelID: "mimo-v2.6-flash-free"
+    });
+
+    const content = result.structuredContent as any;
+    expect(content.ok).toBe(false);
+    expect(content.error).toMatch(/verified zero-cost/);
+    expect(mockClient.sendMessage).not.toHaveBeenCalled();
   });
 
   it("times out and returns partial results", async () => {
@@ -613,17 +707,17 @@ describe("MCP Tools - ia_dev_run_task", () => {
             branch: "feature-branch",
             head: "def456",
             clean: false,
-            porcelain: "## feature-branch\n M newfile.txt",
-            untracked: ["newfile.txt"],
+            porcelain: "## feature-branch\n M src/generated/newfile.txt",
+            untracked: ["src/generated/newfile.txt"],
             modified: [],
             staged: []
           }),
         getGitDiffIncludingUntracked: vi.fn().mockResolvedValue({
           repoPath: "/tmp/test/repo",
           topLevel: "/tmp/test/repo",
-          diff: "diff --git a/newfile.txt b/newfile.txt\nnew file mode 100644\n--- /dev/null\n+++ b/newfile.txt\n@@ -0,0 +1 @@\n+new content",
+          diff: "diff --git a/src/generated/newfile.txt b/src/generated/newfile.txt\nnew file mode 100644\n--- /dev/null\n+++ b/src/generated/newfile.txt\n@@ -0,0 +1 @@\n+new content",
           stagedDiff: "",
-          untracked: [{ path: "newfile.txt", readable: true }],
+          untracked: [{ path: "src/generated/newfile.txt", readable: true }],
           hasChanges: true
         }),
         validateGitRepo: vi.fn().mockResolvedValue({
@@ -816,17 +910,17 @@ describe("MCP Tools - ia_dev_run_task", () => {
             branch: "main",
             head: "def456",
             clean: false,
-            porcelain: "## main\n M newfile.txt",
-            untracked: ["newfile.txt"],
+            porcelain: "## main\n M src/generated/newfile.txt",
+            untracked: ["src/generated/newfile.txt"],
             modified: [],
             staged: []
           }),
         getGitDiffIncludingUntracked: vi.fn().mockResolvedValue({
           repoPath: "/tmp/test/repo",
           topLevel: "/tmp/test/repo",
-          diff: "diff --git a/newfile.txt b/newfile.txt\nnew file mode 100644\n--- /dev/null\n+++ b/newfile.txt\n@@ -0,0 +1 @@\n+new content",
+          diff: "diff --git a/src/generated/newfile.txt b/src/generated/newfile.txt\nnew file mode 100644\n--- /dev/null\n+++ b/src/generated/newfile.txt\n@@ -0,0 +1 @@\n+new content",
           stagedDiff: "",
-          untracked: [{ path: "newfile.txt", readable: true }],
+          untracked: [{ path: "src/generated/newfile.txt", readable: true }],
           hasChanges: true
         }),
         validateGitRepo: vi.fn().mockResolvedValue({
@@ -903,17 +997,17 @@ describe("MCP Tools - ia_dev_run_task", () => {
             branch: "feature-branch",
             head: "def456",
             clean: false,
-            porcelain: "## feature-branch\n M existing.txt\n M newfile.txt",
-            untracked: ["newfile.txt"],
+            porcelain: "## feature-branch\n M existing.txt\n M src/generated/newfile.txt",
+            untracked: ["src/generated/newfile.txt"],
             modified: ["existing.txt"],
             staged: []
           }),
         getGitDiffIncludingUntracked: vi.fn().mockResolvedValue({
           repoPath: "/tmp/test/repo",
           topLevel: "/tmp/test/repo",
-          diff: "diff --git a/newfile.txt b/newfile.txt\nnew file mode 100644\n--- /dev/null\n+++ b/newfile.txt\n@@ -0,0 +1 @@\n+new content",
+          diff: "diff --git a/src/generated/newfile.txt b/src/generated/newfile.txt\nnew file mode 100644\n--- /dev/null\n+++ b/src/generated/newfile.txt\n@@ -0,0 +1 @@\n+new content",
           stagedDiff: "",
-          untracked: [{ path: "newfile.txt", readable: true }],
+          untracked: [{ path: "src/generated/newfile.txt", readable: true }],
           hasChanges: true
         }),
         validateGitRepo: vi.fn().mockResolvedValue({
@@ -972,17 +1066,17 @@ describe("MCP Tools - ia_dev_run_task additional scenarios", () => {
             branch: "feature-branch",
             head: "def456",
             clean: false,
-            porcelain: "## feature-branch\n M newfile.txt",
-            untracked: ["newfile.txt"],
+            porcelain: "## feature-branch\n M src/generated/newfile.txt",
+            untracked: ["src/generated/newfile.txt"],
             modified: [],
             staged: []
           }),
         getGitDiffIncludingUntracked: vi.fn().mockResolvedValue({
           repoPath: "/tmp/test/repo",
           topLevel: "/tmp/test/repo",
-          diff: "diff --git a/newfile.txt b/newfile.txt\nnew file mode 100644\n--- /dev/null\n+++ b/newfile.txt\n@@ -0,0 +1 @@\n+new content",
+          diff: "diff --git a/src/generated/newfile.txt b/src/generated/newfile.txt\nnew file mode 100644\n--- /dev/null\n+++ b/src/generated/newfile.txt\n@@ -0,0 +1 @@\n+new content",
           stagedDiff: "",
-          untracked: [{ path: "newfile.txt", readable: true }],
+          untracked: [{ path: "src/generated/newfile.txt", readable: true }],
           hasChanges: true
         }),
         validateGitRepo: vi.fn().mockResolvedValue({
@@ -1037,17 +1131,17 @@ describe("MCP Tools - ia_dev_run_task additional scenarios", () => {
             branch: "feature-branch",
             head: "def456",
             clean: false,
-            porcelain: "## feature-branch\n M newfile.txt",
-            untracked: ["newfile.txt"],
+            porcelain: "## feature-branch\n M src/generated/newfile.txt",
+            untracked: ["src/generated/newfile.txt"],
             modified: [],
             staged: []
           }),
         getGitDiffIncludingUntracked: vi.fn().mockResolvedValue({
           repoPath: "/tmp/test/repo",
           topLevel: "/tmp/test/repo",
-          diff: "diff --git a/newfile.txt b/newfile.txt\nnew file mode 100644\n--- /dev/null\n+++ b/newfile.txt\n@@ -0,0 +1 @@\n+new content",
+          diff: "diff --git a/src/generated/newfile.txt b/src/generated/newfile.txt\nnew file mode 100644\n--- /dev/null\n+++ b/src/generated/newfile.txt\n@@ -0,0 +1 @@\n+new content",
           stagedDiff: "",
-          untracked: [{ path: "newfile.txt", readable: true }],
+          untracked: [{ path: "src/generated/newfile.txt", readable: true }],
           hasChanges: true
         }),
         validateGitRepo: vi.fn().mockResolvedValue({
@@ -1102,17 +1196,17 @@ describe("MCP Tools - ia_dev_run_task additional scenarios", () => {
             branch: "feature-branch",
             head: "def456",
             clean: false,
-            porcelain: "## feature-branch\n M newfile.txt",
-            untracked: ["newfile.txt"],
+            porcelain: "## feature-branch\n M src/generated/newfile.txt",
+            untracked: ["src/generated/newfile.txt"],
             modified: [],
             staged: []
           }),
         getGitDiffIncludingUntracked: vi.fn().mockResolvedValue({
           repoPath: "/tmp/test/repo",
           topLevel: "/tmp/test/repo",
-          diff: "diff --git a/newfile.txt b/newfile.txt\nnew file mode 100644\n--- /dev/null\n+++ b/newfile.txt\n@@ -0,0 +1 @@\n+new content",
+          diff: "diff --git a/src/generated/newfile.txt b/src/generated/newfile.txt\nnew file mode 100644\n--- /dev/null\n+++ b/src/generated/newfile.txt\n@@ -0,0 +1 @@\n+new content",
           stagedDiff: "",
-          untracked: [{ path: "newfile.txt", readable: true }],
+          untracked: [{ path: "src/generated/newfile.txt", readable: true }],
           hasChanges: true
         }),
         validateGitRepo: vi.fn().mockResolvedValue({
@@ -1210,5 +1304,169 @@ describe("MCP Tools - ia_dev_run_task additional scenarios", () => {
     const content = result.structuredContent as any;
     expect(content.success).toBe(false);
     expect(content.error).toContain("no Git changes detected");
+  });
+});
+describe("MCP Tools - ia_dev_run_task post-hoc guards", () => {
+  function runTaskWithFinalStatus(finalStatus: Record<string, unknown>) {
+    const { config, processManager, state, mockClient } = createMockContext({
+      gitMocks: {
+        getGitStatus: vi.fn()
+          .mockResolvedValueOnce({
+            repoPath: "/tmp/test/repo", topLevel: "/tmp/test/repo", branch: "feature-branch",
+            head: "abc123", clean: true, porcelain: "## feature-branch",
+            untracked: [], modified: [], staged: []
+          })
+          .mockResolvedValueOnce({
+            repoPath: "/tmp/test/repo", topLevel: "/tmp/test/repo", branch: "feature-branch",
+            head: "def456", clean: false, porcelain: "", ...finalStatus
+          }),
+        getGitDiffIncludingUntracked: vi.fn().mockResolvedValue({
+          repoPath: "/tmp/test/repo", topLevel: "/tmp/test/repo",
+          diff: "diff --git a/src/a.ts b/src/a.ts\n@@ -1 +1 @@\n-x\n+y",
+          stagedDiff: "", untracked: [{ path: "src/a.ts", readable: true }], hasChanges: true
+        })
+      }
+    });
+    const server = createBridgeMcpServer({ config, processManager: processManager as any, state: state as any });
+    const tool = (server as any)._registeredTools?.ia_dev_run_task;
+    return tool.handler({
+      repoPath: "/tmp/test/repo", prompt: "edit", timeoutMs: 10000, pollIntervalMs: 10, includeMessages: false
+    }).then(result => result.structuredContent as any);
+  }
+
+  it("fails the task when the agent writes outside write_paths", async () => {
+    const content = await runTaskWithFinalStatus({
+      untracked: ["config/secrets/leak.txt"], modified: [], staged: []
+    });
+    expect(content.success).toBe(false);
+    expect(content.error).toContain("outside the profile write policy");
+    expect(content.pathPolicy.deniedPaths).toContain("config/secrets/leak.txt");
+  });
+
+  it("fails the task when the agent touches protected_paths", async () => {
+    const content = await runTaskWithFinalStatus({
+      untracked: [], modified: [".github/workflows/ci.yml"], staged: []
+    });
+    expect(content.success).toBe(false);
+    expect(content.pathPolicy.deniedPaths).toContain(".github/workflows/ci.yml");
+  });
+
+  it("fails the task when the agent stages a path outside write_paths", async () => {
+    const content = await runTaskWithFinalStatus({
+      untracked: [], modified: [], staged: ["docs/notes.md"]
+    });
+    expect(content.success).toBe(false);
+    expect(content.pathPolicy.deniedPaths).toContain("docs/notes.md");
+  });
+
+  it("allows tracked and untracked changes inside write_paths", async () => {
+    const content = await runTaskWithFinalStatus({
+      untracked: ["src/new.ts"], modified: ["src/existing.ts"], staged: []
+    });
+    expect(content.success).toBe(true);
+    expect(content.pathPolicy.deniedPaths).toEqual([]);
+    expect(content.pathPolicy.changedPaths).toEqual(["src/existing.ts", "src/new.ts"]);
+  });
+
+  it("fails closed when the session actually ran a non-free model", async () => {
+    const { config, processManager, state, mockClient } = createMockContext({
+      gitMocks: {
+        getGitStatus: vi.fn()
+          .mockResolvedValueOnce({
+            repoPath: "/tmp/test/repo", topLevel: "/tmp/test/repo", branch: "feature-branch",
+            head: "abc123", clean: true, porcelain: "## feature-branch", untracked: [], modified: [], staged: []
+          })
+          .mockResolvedValueOnce({
+            repoPath: "/tmp/test/repo", topLevel: "/tmp/test/repo", branch: "feature-branch",
+            head: "def456", clean: false, porcelain: " M src/a.ts", untracked: [], modified: ["src/a.ts"], staged: []
+          })
+      }
+    });
+    mockClient.getMessages.mockResolvedValue([
+      { info: { role: "assistant", providerID: "anthropic", modelID: "claude-3-opus", cost: 0 }, parts: [] }
+    ]);
+    const server = createBridgeMcpServer({ config, processManager: processManager as any, state: state as any });
+    const tool = (server as any)._registeredTools?.ia_dev_run_task;
+    const result = await tool.handler({
+      repoPath: "/tmp/test/repo", prompt: "edit", timeoutMs: 10000, pollIntervalMs: 10, includeMessages: false
+    });
+    const content = result.structuredContent as any;
+    expect(content.success).toBe(false);
+    expect(content.error).toMatch(/non-registered model/);
+  });
+
+  it("fails closed when the session reported a nonzero cost", async () => {
+    const { config, processManager, state, mockClient } = createMockContext({
+      gitMocks: {
+        getGitStatus: vi.fn()
+          .mockResolvedValueOnce({
+            repoPath: "/tmp/test/repo", topLevel: "/tmp/test/repo", branch: "feature-branch",
+            head: "abc123", clean: true, porcelain: "## feature-branch", untracked: [], modified: [], staged: []
+          })
+          .mockResolvedValueOnce({
+            repoPath: "/tmp/test/repo", topLevel: "/tmp/test/repo", branch: "feature-branch",
+            head: "def456", clean: false, porcelain: " M src/a.ts", untracked: [], modified: ["src/a.ts"], staged: []
+          })
+      }
+    });
+    mockClient.getMessages.mockResolvedValue([
+      { info: { role: "assistant", providerID: "opencode", modelID: "mimo-v2.6-flash-free", cost: 0.42 }, parts: [] }
+    ]);
+    const server = createBridgeMcpServer({ config, processManager: processManager as any, state: state as any });
+    const tool = (server as any)._registeredTools?.ia_dev_run_task;
+    const result = await tool.handler({
+      repoPath: "/tmp/test/repo", prompt: "edit", timeoutMs: 10000, pollIntervalMs: 10, includeMessages: false
+    });
+    const content = result.structuredContent as any;
+    expect(content.success).toBe(false);
+    expect(content.error).toMatch(/above the free-only budget/);
+  });
+
+  it("never resubmits the prompt after an unknown submission outcome", async () => {
+    const { config, processManager, state, mockClient } = createMockContext();
+    mockClient.sendMessage.mockRejectedValue(
+      new OpencodeHttpError(503, "Service Unavailable", "/session/s/prompt_async", "upstream busy")
+    );
+    const server = createBridgeMcpServer({ config, processManager: processManager as any, state: state as any });
+    const tool = (server as any)._registeredTools?.ia_dev_run_task;
+    const result = await tool.handler({
+      repoPath: "/tmp/test/repo", prompt: "edit", timeoutMs: 10000, pollIntervalMs: 10
+    });
+    const content = result.structuredContent as any;
+    expect(content.ok).toBe(false);
+    expect(content.error).toMatch(/outcome is unknown/);
+    expect(content.error).toMatch(/NOT resubmitted/);
+    expect(mockClient.sendMessage).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not resubmit after an explicit quota rejection and explains why", async () => {
+    const { config, processManager, state, mockClient } = createMockContext();
+    mockClient.sendMessage.mockRejectedValue(
+      new OpencodeHttpError(429, "Too Many Requests", "/session/s/prompt_async", "slow down")
+    );
+    const server = createBridgeMcpServer({ config, processManager: processManager as any, state: state as any });
+    const tool = (server as any)._registeredTools?.ia_dev_run_task;
+    const result = await tool.handler({
+      repoPath: "/tmp/test/repo", prompt: "edit", timeoutMs: 10000, pollIntervalMs: 10
+    });
+    const content = result.structuredContent as any;
+    expect(content.ok).toBe(false);
+    expect(content.error).toMatch(/429/);
+    expect(content.error).toMatch(/not resubmitted/);
+    expect(mockClient.sendMessage).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not resubmit after a deadline expiry", async () => {
+    const { config, processManager, state, mockClient } = createMockContext();
+    mockClient.sendMessage.mockRejectedValue(new OpencodeRequestTimeoutError("POST", "/session/s/prompt_async", 30000));
+    const server = createBridgeMcpServer({ config, processManager: processManager as any, state: state as any });
+    const tool = (server as any)._registeredTools?.ia_dev_run_task;
+    const result = await tool.handler({
+      repoPath: "/tmp/test/repo", prompt: "edit", timeoutMs: 10000, pollIntervalMs: 10
+    });
+    const content = result.structuredContent as any;
+    expect(content.ok).toBe(false);
+    expect(content.error).toMatch(/outcome is unknown/);
+    expect(mockClient.sendMessage).toHaveBeenCalledTimes(1);
   });
 });

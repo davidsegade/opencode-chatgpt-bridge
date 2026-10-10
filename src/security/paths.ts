@@ -81,22 +81,43 @@ export async function listProjects(allowedRoots: string[], depth = 2): Promise<P
   return [...projects.values()].sort((a, b) => a.path.localeCompare(b.path));
 }
 
-/** Reject symlink components without reading their targets. Missing paths may
- * be proposed for creation; filesystem errors other than ENOENT fail closed. */
-export async function isSafeRepoFilePath(repoPath: string, filePath: string): Promise<boolean> {
+/**
+ * Reject symlink components without reading their targets.
+ *
+ * `mode` separates the two semantics that used to be conflated:
+ * - "read": a path that does not exist is NOT readable, so ENOENT fails closed.
+ * - "proposed-write": a missing final path is legitimate, because creating a new
+ *   file is the point; only a missing *intermediate* directory is allowed too,
+ *   so the caller can create nested files.
+ *
+ * Filesystem errors other than ENOENT fail closed. This is a preflight check
+ * with a TOCTOU window: it runs in the bridge process while the actual read is
+ * performed by the OpenCode server, so it is not a sandbox.
+ */
+export async function isSafeRepoFilePath(
+  repoPath: string,
+  filePath: string,
+  mode: "read" | "proposed-write" = "proposed-write"
+): Promise<boolean> {
   let current: string;
   try { current = await realpath(repoPath); } catch { return false; }
   const normalized = normalizeRelPath(filePath);
   const segments = normalized.split("/");
   if (normalized === "." || isAbsolute(normalized) || segments.includes("..") || normalized.includes("\0")) return false;
+  if (segments.length === 0 || segments.some(segment => segment.length === 0)) return false;
   for (let index = 0; index < segments.length; index++) {
     current = join(current, segments[index]!);
+    const isLast = index === segments.length - 1;
     try {
       const info = await lstat(current);
       if (info.isSymbolicLink()) return false;
-      if (index < segments.length - 1 && !info.isDirectory()) return false;
+      if (!isLast && !info.isDirectory()) return false;
+      if (isLast && mode === "read" && !info.isFile()) return false;
     } catch (error) {
-      return Boolean(error && typeof error === "object" && "code" in error && error.code === "ENOENT");
+      const code = error && typeof error === "object" && "code" in error ? error.code : undefined;
+      // ENOENT: an unreadable path fails closed; a not-yet-created path is a
+      // legitimate write target.
+      return code === "ENOENT" && mode === "proposed-write";
     }
   }
   return true;
@@ -104,7 +125,9 @@ export async function isSafeRepoFilePath(repoPath: string, filePath: string): Pr
 
 export async function validateContextAccess(repoPath: string, filePaths: string[]): Promise<AccessValidationResult> {
   const profile = await loadProfile(repoPath);
-  const decisions = await Promise.all(filePaths.map(async p => validateReadAccess(profile, p) && await isSafeRepoFilePath(repoPath, p)));
+  const decisions = await Promise.all(
+    filePaths.map(async p => validateReadAccess(profile, p) && (await isSafeRepoFilePath(repoPath, p, "read")))
+  );
   const deniedPaths = filePaths.filter((_p, index) => !decisions[index]);
   return {
     allowed: deniedPaths.length === 0,
@@ -114,7 +137,9 @@ export async function validateContextAccess(repoPath: string, filePaths: string[
 
 export async function validateWriteAccess(repoPath: string, filePaths: string[]): Promise<AccessValidationResult> {
   const profile = await loadProfile(repoPath);
-  const decisions = await Promise.all(filePaths.map(async p => profileValidateWriteAccess(profile, p) && await isSafeRepoFilePath(repoPath, p)));
+  const decisions = await Promise.all(
+    filePaths.map(async p => profileValidateWriteAccess(profile, p) && (await isSafeRepoFilePath(repoPath, p, "proposed-write")))
+  );
   const deniedPaths = filePaths.filter((_p, index) => !decisions[index]);
   return {
     allowed: deniedPaths.length === 0,

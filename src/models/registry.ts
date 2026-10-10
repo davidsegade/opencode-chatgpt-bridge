@@ -1,4 +1,5 @@
 import { z } from "zod/v4";
+import { OpencodeHttpError, OpencodeRequestTimeoutError } from "../opencode/client.js";
 
 export type FreeModel = {
   provider: string;
@@ -46,46 +47,43 @@ export function getFreeModelProviders(): string[] {
   return [...new Set(FREE_MODELS.map((m) => m.provider))];
 }
 
-export type QuotaErrorCode = "QUOTA_EXCEEDED" | "RATE_LIMITED" | "PROVIDER_UNAVAILABLE" | "MODEL_NOT_FOUND";
+export type QuotaErrorCode = "QUOTA_EXCEEDED" | "RATE_LIMITED";
 
 export class QuotaError extends Error {
   public readonly code: QuotaErrorCode;
-  public readonly model: FreeModel;
+  public readonly status: number;
 
-  constructor(message: string, code: QuotaErrorCode, model: FreeModel) {
+  constructor(message: string, code: QuotaErrorCode, status: number) {
     super(message);
     this.name = "QuotaError";
     this.code = code;
-    this.model = model;
+    this.status = status;
   }
 }
 
+/**
+ * Classify a rejected submission from the structured HTTP status only.
+ *
+ * The response body is provider-controlled free text, so it is never used to
+ * decide whether a prompt may be retried: a 500 whose body happens to say
+ * "rate limit" must not be treated as a safe-to-retry quota rejection.
+ */
 export function detectQuotaError(error: unknown): QuotaError | undefined {
-  if (!(error instanceof Error)) return undefined;
-  const message = error.message.toLowerCase();
-  if (message.includes("quota") || message.includes("exceeded") || message.includes("limit exceeded")) {
-    return new QuotaError(error.message, "QUOTA_EXCEEDED", { provider: "", modelId: "", alias: "" });
-  }
-  if (message.includes("rate limit") || message.includes("rate limited") || message.includes("429")) {
-    return new QuotaError(error.message, "RATE_LIMITED", { provider: "", modelId: "", alias: "" });
-  }
-  if (message.includes("unavailable") || message.includes("503") || message.includes("502") || message.includes("connection refused")) {
-    return new QuotaError(error.message, "PROVIDER_UNAVAILABLE", { provider: "", modelId: "", alias: "" });
-  }
-  if (message.includes("not found") || message.includes("404") || message.includes("model not found")) {
-    return new QuotaError(error.message, "MODEL_NOT_FOUND", { provider: "", modelId: "", alias: "" });
-  }
+  if (!(error instanceof OpencodeHttpError)) return undefined;
+  if (error.status === 429) return new QuotaError(error.message, "RATE_LIMITED", 429);
+  if (error.status === 402) return new QuotaError(error.message, "QUOTA_EXCEEDED", 402);
   return undefined;
 }
 
-export function resolveFreeModelFallback(
-  primary: FreeModel,
-  exclude: Set<string> = new Set()
-): FreeModel | undefined {
-  const candidates = FREE_MODELS.filter(
-    (m) => m.provider === primary.provider && m.modelId !== primary.modelId && !exclude.has(m.modelId)
-  );
-  return candidates[0];
+/**
+ * True when the outcome of a mutation is unknown: a deadline, a transport
+ * error or any 5xx that is not an explicit quota rejection. Callers must not
+ * resubmit a prompt in this state.
+ */
+export function isSubmissionOutcomeUnknown(error: unknown): boolean {
+  if (error instanceof OpencodeRequestTimeoutError) return true;
+  if (error instanceof OpencodeHttpError) return error.status >= 500;
+  return error instanceof Error;
 }
 
 export function isFreeModel(identifier: string): boolean {
