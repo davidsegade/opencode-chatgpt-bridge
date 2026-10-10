@@ -227,9 +227,22 @@ describe("observed zero-cost execution (real AssistantMessage shape)", () => {
       models: ["opencode/mimo-v2.6-flash-free"]
     });
   });
-  it("ignores user messages", () => {
+  it("fails closed when there are no assistant messages", () => {
     const user = assistant({ role: "user" });
-    expect(validateObservedFreeUsage([user]).assistantMessages).toBe(0);
+    expect(() => validateObservedFreeUsage([user])).toThrow(/No assistant messages/);
+  });
+  it("accepts a mix of user and assistant messages", () => {
+    const user = assistant({ role: "user" });
+    const result = validateObservedFreeUsage([user, assistant()]);
+    expect(result.assistantMessages).toBe(1);
+  });
+  it("fails closed when a message lacks info", () => {
+    expect(() => validateObservedFreeUsage([{ parts: [] }])).toThrow(/lacks info metadata/);
+  });
+  it("fails closed when info lacks a role", () => {
+    const noRole = assistant();
+    Reflect.deleteProperty(noRole.info, "role");
+    expect(() => validateObservedFreeUsage([noRole])).toThrow(/lacks a role/);
   });
   it("rejects a turn that actually used a paid model", () => {
     expect(() => validateObservedFreeUsage([assistant({ providerID: "anthropic", modelID: "claude-3-opus" })])).toThrow(

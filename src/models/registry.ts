@@ -184,8 +184,13 @@ export function validateObservedFreeUsage(messages: unknown): ObservedUsageRepor
   const report: ObservedUsageReport = { assistantMessages: 0, observedCost: 0, models: [] };
   for (const message of messages) {
     const info = (message as { info?: unknown })?.info;
-    if (typeof info !== "object" || info === null) continue;
+    if (typeof info !== "object" || info === null) {
+      throw new Error("Message lacks info metadata; cannot verify observed model cost.");
+    }
     const role = (info as { role?: unknown }).role;
+    if (typeof role !== "string") {
+      throw new Error("Message lacks a role; cannot verify observed model cost.");
+    }
     if (role !== "assistant") continue;
     const parsed = ObservedAssistantSchema.safeParse(info);
     if (!parsed.success) throw new Error("Assistant message lacks provider/model/cost metadata; cannot verify zero-cost execution.");
@@ -197,6 +202,9 @@ export function validateObservedFreeUsage(messages: unknown): ObservedUsageRepor
     report.observedCost += cost;
     const label = `${providerID}/${modelID}`;
     if (!report.models.includes(label)) report.models.push(label);
+  }
+  if (report.assistantMessages === 0) {
+    throw new Error("No assistant messages found; cannot verify zero-cost execution.");
   }
   if (report.observedCost > 0) {
     throw new Error(`Session reported cost ${report.observedCost} above the free-only budget of 0.`);

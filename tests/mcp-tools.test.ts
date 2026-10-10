@@ -83,7 +83,7 @@ function createMockContext(overrides: Partial<{
     createSession: vi.fn().mockResolvedValue({ id: "ses_test123", title: "Test Session" }),
     getSessionStatus: vi.fn().mockResolvedValue({ ses_test123: { status: "idle" } }),
     sendMessage: vi.fn().mockResolvedValue({ info: {}, parts: [{ type: "text", text: "Response" }] }),
-    getMessages: vi.fn().mockResolvedValue([{ info: {}, parts: [{ type: "text", text: "Hello" }] }]),
+    getMessages: vi.fn().mockResolvedValue([{ info: { role: "assistant", providerID: "opencode", modelID: "mimo-v2.6-flash-free", cost: 0 }, parts: [{ type: "text", text: "Hello" }] }]),
     getDiff: vi.fn().mockResolvedValue([{ path: "test.ts", diff: "+ console.log('hello')" }]),
     listAgents: vi.fn().mockResolvedValue([]),
     listCommands: vi.fn().mockResolvedValue([]),

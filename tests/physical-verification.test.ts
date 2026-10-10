@@ -30,7 +30,7 @@ beforeEach(async () => {
 });
 afterEach(async () => { await rm(repo, { recursive: true, force: true }); });
 function bridge(action: () => Promise<unknown> = async () => {}, status = { type: "idle" }) {
-  const client = { listProviders: vi.fn(async () => ({ connected: ["opencode"], all: [{ id: "opencode", name: "opencode", env: [], models: Object.fromEntries(["mimo-v2.6-flash-free", "space-bunny-free"].map(id => [id, { id, name: id, release_date: "2026-01-01", attachment: false, reasoning: false, temperature: true, tool_call: true, cost: { input: 0, output: 0, cache_read: 0, cache_write: 0 }, limit: { context: 200000, output: 8192 }, options: {} }])) }], default: {} })), createSession: vi.fn(async () => ({ id: "s" })), sendMessage: vi.fn(action), getSessionStatus: async () => ({ s: status }), getMessages: async () => [], getDiff: vi.fn(async () => [{ diff: "claimed change" }]), getSession: vi.fn(async (sessionId: string) => ({ id: sessionId, directory: repo })) };
+  const client = { listProviders: vi.fn(async () => ({ connected: ["opencode"], all: [{ id: "opencode", name: "opencode", env: [], models: Object.fromEntries(["mimo-v2.6-flash-free", "space-bunny-free"].map(id => [id, { id, name: id, release_date: "2026-01-01", attachment: false, reasoning: false, temperature: true, tool_call: true, cost: { input: 0, output: 0, cache_read: 0, cache_write: 0 }, limit: { context: 200000, output: 8192 }, options: {} }])) }], default: {} })), createSession: vi.fn(async () => ({ id: "s" })), sendMessage: vi.fn(action), getSessionStatus: async () => ({ s: status }), getMessages: async () => [{ info: { role: "assistant", providerID: "opencode", modelID: "mimo-v2.6-flash-free", cost: 0 }, parts: [] }], getDiff: vi.fn(async () => [{ diff: "claimed change" }]), getSession: vi.fn(async (sessionId: string) => ({ id: sessionId, directory: repo })) };
   const server = createBridgeMcpServer({ config: { allowedRoots: [repo] } as any, processManager: { ensure: async () => ({ baseUrl: "http://localhost:1" }), clientFor: () => client } as any, state: { createSession: async (x: unknown) => x, getSession: async () => ({ opencodeSessionId: "ses_old", repoPath: repo, baseUrl: "http://localhost:2" }), updateSession: async (_id: string, patch: Record<string, unknown>) => ({ opencodeSessionId: "ses_old", repoPath: repo, baseUrl: "http://localhost:1", ...patch }) } as any });
   const tool = (server as any)._registeredTools.ia_dev_run_task;
   return { server, client, run: async (extra = {}) => (await tool.handler(tool.inputSchema.parse({ repoPath: repo, prompt: "test", includeMessages: false, ...extra }))).structuredContent };
@@ -116,7 +116,7 @@ describe("physical task verification", () => {
     const b = bridge(); const tool = (b.server as any)._registeredTools.opencode_get_messages;
     const r = await tool.handler(tool.inputSchema.parse({ bridgeSessionId: "old" }));
     expect(r.structuredContent.code).toBeUndefined();
-    expect(r.structuredContent.messages).toEqual([]);
+    expect(r.structuredContent.messages).toEqual([{ info: { role: "assistant", providerID: "opencode", modelID: "mimo-v2.6-flash-free", cost: 0 }, parts: [] }]);
     expect(r.structuredContent.managedServer).toBe("http://localhost:1");
   });
   it("does not rebind a session that belongs to a different project", { timeout: 10000 }, async () => {
