@@ -71,7 +71,7 @@ models:
 # =============================================================================
 
 limits:
-  max_context_tokens: 4000    # Context budget for Author + Ranker
+  max_context_tokens: 4000    # Context budget for Author model
   max_attempts: 3             # Retries on verification failure
   timeout_ms: 300000          # 5 minutes per attempt
 

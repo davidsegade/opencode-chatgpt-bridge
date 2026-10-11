@@ -50,4 +50,10 @@ describe("opencode CLI detection", () => {
       await rm(root, { recursive: true, force: true });
     }
   });
+
+  it("reports installed when the binary is a valid executable", async () => {
+    const status = await checkOpencodeCli(config({ opencodeBin: process.execPath }));
+    expect(status.installed).toBe(true);
+    expect(status.version).toMatch(/^v?\d/);
+  });
 });

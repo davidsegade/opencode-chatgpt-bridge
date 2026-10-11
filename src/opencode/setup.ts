@@ -7,17 +7,14 @@ const execFileAsync = promisify(execFile);
 export type OpencodeCliStatus = {
   installed: boolean;
   version?: string;
-  path?: string;
   error?: string;
 };
 
 export async function checkOpencodeCli(config: BridgeConfig): Promise<OpencodeCliStatus> {
   try {
-    const [versionResult, pathResult] = await Promise.allSettled([
-      execFileAsync(config.opencodeBin, ["--version"], { timeout: 5000 }),
-      execFileAsync("which", [config.opencodeBin], { timeout: 5000 })
+    const [versionResult] = await Promise.allSettled([
+      execFileAsync(config.opencodeBin, ["--version"], { timeout: 5000 })
     ]);
-    const path = pathResult.status === "fulfilled" ? pathResult.value.stdout.trim() : undefined;
     // `--version` failing (ENOENT, EACCES, non-zero exit) is the authoritative
     // signal. Promise.allSettled never rejects, so this must be inspected here:
     // without it a missing binary reads as "installed with an unknown version"
@@ -26,12 +23,11 @@ export async function checkOpencodeCli(config: BridgeConfig): Promise<OpencodeCl
       const reason = versionResult.reason;
       return {
         installed: false,
-        path,
         error: reason instanceof Error ? reason.message : String(reason)
       };
     }
     const version = versionResult.value.stdout.trim() || versionResult.value.stderr.trim();
-    return { installed: true, version, path };
+    return { installed: true, version };
   } catch (error) {
     return {
       installed: false,
@@ -44,7 +40,7 @@ export function getOpencodeSetupText(status: OpencodeCliStatus, config: BridgeCo
   const lines: string[] = [];
   lines.push("6) opencode local setup");
   if (status.installed) {
-    lines.push(`   opencode: installed${status.version ? ` (${status.version})` : ""}${status.path ? ` at ${status.path}` : ""}`);
+    lines.push(`   opencode: installed${status.version ? ` (${status.version})` : ""}`);
   } else {
     lines.push("   opencode: NOT FOUND");
     lines.push("   Install/login opencode first, then restart this bridge.");

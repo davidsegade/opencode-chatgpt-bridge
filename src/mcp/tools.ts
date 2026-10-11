@@ -305,8 +305,12 @@ export function createBridgeMcpServer(ctx: RegisterContext): McpServer {
     "opencode_get_messages",
     {
       title: "Get opencode messages",
-      description: "Fetch messages from a bridge session. Fails if the session cannot be recovered on the current managed server.",
-      inputSchema: { bridgeSessionId: z.string().min(1), limit: z.number().int().min(1).max(200).optional() },
+      description:
+        "Fetch messages from a bridge session. Fails if the session cannot be recovered on the current managed server. `limit` uses tail semantics (most recent N). Defaults to the last 50 messages when omitted.",
+      inputSchema: {
+        bridgeSessionId: z.string().min(1),
+        limit: z.number().int().min(1).max(200).default(50),
+      },
       annotations: { readOnlyHint: true, openWorldHint: false }
     },
     async ({ bridgeSessionId, limit }) =>
