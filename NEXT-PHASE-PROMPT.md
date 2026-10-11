@@ -12,12 +12,16 @@
 3. Stale "Author + Ranker" comment in `.ia-dev.yml.example` corrected
 4. CI blockage on PR #2 documented (upstream base repo has no workflow; no admin access)
 
+## Graphify / ECC decision — closed (2026-10-12)
+- Lab research completed: Graphify + ranker merged in `ia-dev-architecture-lab` (`1db7309`, PR #62); ECC on unmerged branch `feat/graphify-ecc-context` (`69c3cf2`)
+- Repeated benchmark (PR #89, 9 runs): ranked 2/3 (author timeout), +5.4% input, +19.7% cache-read vs control; conclusion: no demonstrated efficiency/reliability gain to promote ranked or add ECC
+- **Decision for this bridge: keep as external lab roadmap. Do not port to bridge this phase.** Reevaluate only with new quantitative evidence showing a clear win.
+
 ## Open questions for next phase
-- **Graphify / ECC**: the architecture lab (ia-dev-architecture-lab) lists Graphify, Context Ranker, and ECC as Phase B items (draft PRs #86/#87/#89 pending human review). Decision needed: integrate any of these into this bridge, or keep as external roadmap.
 - **CI for PR #2**: the upstream repo `yuga-hashimoto/opencode-chatgpt-bridge` has no CI workflow on main and no readable Actions policies. Either request CI activation there, or open a PR against the fork's own `main` branch.
 - **AGENTS.md / PROJECT-CONTEXT.md**: these docs are now created; future phases may refine them.
 
-## Next steps (human-decision required)
-1. Decide on Graphify/ECC — keep as external roadmap, or plan integration into this bridge.
-2. If CI for PR #2 is needed, coordinate with upstream repo maintainers (or open a PR against the fork's main).
-3. Run `pnpm validate` to confirm full suite passes after any new changes.
+## Next phase: CI for PR #2 resolution
+1. Coordinate with upstream repo maintainers to activate CI on `yuga-hashimoto/opencode-chatgpt-bridge`, or open a PR against the fork's own `main` branch so `pull_request` workflows execute in the fork's own CI.
+2. If CI is activated, verify `pnpm validate` passes on the fork.
+3. After CI is green, the bridge phase cycle is fully closed: validate → run → verify → human review → PR.

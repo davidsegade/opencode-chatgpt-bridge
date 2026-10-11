@@ -31,10 +31,12 @@
 - `check-runs` on the PR head commit: **total 0** — no check ever ran.
 - **Nothing local can produce checks on PR #2** without human action on the upstream repo (e.g., requesting CI activation or opening a PR against the fork's own main). Documented in MIGRATION.md.
 
-## Graphify / ECC
+## Graphify / ECC — decision closed 2026-10-12
 - **Zero references** anywhere in IA-DEV (src, tests, .github, README, MIGRATION.md, git history across all branches).
-- Appear only in `ia-dev-architecture-lab/ia-dev-afternoon-report.md:79,85` as "Phase B/C — Graphify, Context Ranker, ECC selective, measurements" and "Phase B implementation (Graphify, Context Ranker, ECC selective)" — a roadmap of the architecture lab, with draft PRs #86/#87/#89 awaiting human review.
-- **Verdict:** a pending phase of the broader IA DEV 2.x architecture, tracked in `ia-dev-architecture-lab` — **not part of this repo's current architecture**, not implemented, not on any branch here. The only vestige in this repo is the `.ia-dev.yml.example` comment "Context budget for Author + Ranker", now corrected to "Context budget for Author model".
+- Lab `origin/main` **has** Graphify + deterministic ranker merged (`1db7309`, PR #62; ranker fix `e8e7068`, PR #80): locked venv `graphifyy==0.9.80` (`toolchain/graphify-requirements.lock`), fail-closed version check, per-attempt fresh extraction, deterministic ranker bounded to 8 files / 6000 chars, `validateGraph` fail-closed.
+- **ECC** exists only on the lab's unmerged branch `feat/graphify-ecc-context` (`69c3cf2`): engine-owned `config/project-memory.json` + planning text, gated `IA_DEV_CONTEXT=graphify-ecc`, ≤1500-char memory, "never expands task or permission", "untrusted navigation evidence".
+- **Verdict benchmark (PR #89, 9 runs, 2026-10-09)**: ranked 2/3 accepted (one author timeout at 180s), median input +5.4% / cache-read +19.7% / slower wall-clock vs control. Recorded conclusion: no demonstrated efficiency or reliability gain to promote ranked or add ECC.
+- **Decision closed:** keep as external lab roadmap. Integration plan (opt-in, off-by-default, invariants) lives in NEXT-PHASE-PROMPT.md. No port to bridge this phase. Reevaluate only with new quantitative evidence showing a clear win.
 
 ## Stale comment fixed
 - `.ia-dev.yml.example:74`: `"Context budget for Author + Ranker"` → `"Context budget for Author model"` (the Ranker component does not exist in this codebase).
