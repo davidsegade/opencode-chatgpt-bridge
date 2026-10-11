@@ -4,6 +4,7 @@
 - **Current branch:** `fix/ia-dev-git-source-of-truth` (HEAD `817ed51`, just after commit `e6dc40b`)
 - **Working tree:** clean
 - **Open PR:** #2 on `yuga-hashimoto/opencode-chatgpt-bridge`, mergeable, head SHA `e6dc40b` = fork tip (pushed)
+- **AGENTS.md:** creado en esta fase como reglas permanentes del proyecto
 
 ## Architecture: Git Physical as Source of Truth
 - The physical filesystem + Git is the only authoritative source of truth.
