@@ -17,6 +17,36 @@ describe("OpencodeClient", () => {
     expect(JSON.parse(String(calls[0]?.init.body))).toEqual({ title: "Title" });
   });
 
+  it("sends the prompt as a single text part and nothing else", async () => {
+    const bodies: Array<{ url: string; body: string }> = [];
+    const fetchImpl: typeof fetch = async (url, init = {}) => {
+      bodies.push({ url: String(url), body: String(init.body) });
+      return new Response(null, { status: 204 });
+    };
+
+    const client = new OpencodeClient({ baseUrl: "http://localhost:4096", fetchImpl });
+    await client.sendMessage({ sessionId: "abc", text: "hello world" });
+
+    // The bridge passes the caller's text through unchanged: no profile, no
+    // file contents and no history replay is serialized into the prompt body.
+    expect(JSON.parse(bodies[0]!.body)).toEqual({ parts: [{ type: "text", text: "hello world" }] });
+  });
+
+  it("omits model/agent/system keys that the caller did not supply", async () => {
+    const bodies: string[] = [];
+    const fetchImpl: typeof fetch = async (_url, init = {}) => {
+      bodies.push(String(init.body));
+      return new Response(null, { status: 204 });
+    };
+
+    const client = new OpencodeClient({ baseUrl: "http://localhost:4096", fetchImpl });
+    await client.sendMessage({ sessionId: "abc", text: "hi" });
+
+    // undefined fields serialize away, so no empty placeholders are sent.
+    const parsed = JSON.parse(bodies[0]!) as Record<string, unknown>;
+    expect(Object.keys(parsed)).toEqual(["parts"]);
+  });
+
   it("uses prompt_async for async messages", async () => {
     const calls: string[] = [];
     const fetchImpl: typeof fetch = async (url) => {
